@@ -1,7 +1,7 @@
 import type { ComponentType, ReactNode } from 'react';
 import type { Context } from '../../context-types.ts';
 import type { SessionScope } from '../api.ts';
-import type { BetterSidebarService } from '../service.ts';
+import type { BetterSidebarService, NativeOpenTab } from '../service.ts';
 import type { SidebarStore, SidebarTab } from '../state.ts';
 /**
  * The plugin-side seed a native open carries in `navigation.params`.
@@ -79,6 +79,8 @@ export interface NativeTabRecords {
     get(id: string): View | undefined;
     /** Whether this id belongs to a native tab (vs the plugin's own layout). */
     has(id: string): boolean;
+    /** Every live record, with the session whose panel holds it. */
+    openTabs(): readonly NativeOpenTab[];
     /** Merge a patch into the synthetic record (the `updateTab` path). */
     update(id: string, patch: {
         title?: string;

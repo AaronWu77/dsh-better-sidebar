@@ -182,6 +182,14 @@ export function EditorHost(props: {
    * second side-open of the same file) in a rightward split of THIS pane.
    */
   const openFileSide = (absolute: string): void => {
+    const service = ctx.get('betterSidebar')
+    // While the native panel owns the right column the plugin's own trees
+    // are not drawn: ask the service for a new pane instead of splitting a
+    // tree nobody renders. The bottom workbench keeps its local split.
+    if (service !== undefined && service.native) {
+      service.openTab({ type: 'editor', title: baseName(absolute), path: absolute, preferNewPane: true }, scope)
+      return
+    }
     store.reduce((state) => {
       const pane = leafWithTab(state.bottomSplits, tab.id) ?? firstLeaf(state.bottomSplits)
       const fresh: SidebarTab = {
@@ -234,10 +242,10 @@ export function EditorHost(props: {
   // panel, free windows): a rename retargets its tab to the new path; a
   // delete closes tabs at or under the removed path. See tree-mutations.ts.
   const onPathRenamed = (oldPath: string, newPath: string): void => {
-    retargetPathTabs(ctx, store, oldPath, newPath)
+    retargetPathTabs(ctx, oldPath, newPath)
   }
   const onPathDeleted = (path: string): void => {
-    closePathTabs(ctx, store, path)
+    closePathTabs(ctx, path)
   }
 
   // The viewer's toolbar, hoisted into THIS header: the text editor reports

@@ -27,7 +27,7 @@ import type { SessionScope } from '../api.ts'
 import { RenderBoundary } from '../RenderBoundary.tsx'
 import { OrphanedTab } from '../OrphanedTab.tsx'
 import { referenceInChat } from '../reference-in-chat.ts'
-import type { BetterSidebarService } from '../service.ts'
+import type { BetterSidebarService, NativeOpenTab } from '../service.ts'
 import type { SidebarStore, SidebarTab, TabType } from '../state.ts'
 import css from '../sidebar.module.css'
 
@@ -113,6 +113,8 @@ export interface NativeTabRecords {
   get(id: string): View | undefined
   /** Whether this id belongs to a native tab (vs the plugin's own layout). */
   has(id: string): boolean
+  /** Every live record, with the session whose panel holds it. */
+  openTabs(): readonly NativeOpenTab[]
   /** Merge a patch into the synthetic record (the `updateTab` path). */
   update(id: string, patch: { title?: string; path?: string; meta?: unknown }): void
   /** Forget a record (the native tab closed). */
@@ -180,6 +182,9 @@ export function createNativeTabRecords(): NativeTabRecords {
     },
     get: id => views.get(id),
     has: id => views.has(id),
+    openTabs() {
+      return [...views].map(([id, view]) => ({ id, sessionId: view.scope.sessionId, tab: view.tab }))
+    },
     update(id, patch) {
       const entry = views.get(id)
       if (entry === undefined) return

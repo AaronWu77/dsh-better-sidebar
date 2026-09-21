@@ -379,6 +379,13 @@ export interface OpenTabSeed {
     id?: string;
     /** A URL the tab navigates to on mount (the browser tab's seed). */
     url?: string;
+    /**
+     * Land the open in a NEW pane of the right column — the tree menu's "open
+     * to the side". The native surface splits the target pane when the layout
+     * allows it and falls back to the target pane; the plugin's own bottom
+     * workbench ignores it. `revealIfOpened` still governs de-duplication.
+     */
+    preferNewPane?: boolean;
     /** JSON-serializable custom state carried on the minted tab (persisted across reloads; v0.12.0+). */
     meta?: unknown;
     /**
@@ -405,6 +412,15 @@ export interface NativeTabParams {
     /** JSON-serializable custom state carried on the synthetic record. */
     meta?: unknown;
 }
+/** One live native tab, as the reconciliation paths read it. */
+export interface NativeOpenTab {
+    /** The native tab id (also the plugin-side record id). */
+    readonly id: string;
+    /** The session whose panel holds the tab. */
+    readonly sessionId: string;
+    /** The plugin-side record (title / path / meta as the components see it). */
+    readonly tab: SidebarTab;
+}
 /**
  * The plugin's write face over DSH's native right Sidebar.
  *
@@ -422,6 +438,7 @@ export interface SidebarSurface {
         kind: string;
         params: NativeTabParams;
         revealIfOpened: boolean;
+        preferNewPane?: boolean;
     }): void;
     /** Open a resource address in one session's native surface. */
     openResource(input: {
@@ -429,7 +446,14 @@ export interface SidebarSurface {
         address: string;
         line?: number;
         revealIfOpened: boolean;
+        preferNewPane?: boolean;
     }): void;
+    /**
+     * Every live native tab. The file-tree reconciliation paths enumerate
+     * these: a rename retargets and a delete closes the affected tabs whether
+     * the plugin's own layout or the native panel holds them.
+     */
+    openTabs(): readonly NativeOpenTab[];
     /** The file address of one path (the native surface owns the grammar). */
     fileAddress(sessionId: string, cwd: string | undefined, path: string): string;
     /** Close one native tab; the closed record's type/title, or undefined when the id is not native. */
@@ -577,6 +601,17 @@ export interface BetterSidebarService {
     activateTab(tabId: string, scope?: SessionScope): void;
     /** Open a file in the sidebar editor of `scope`'s session (title defaults to the file name). */
     openFile(scope: SessionScope, path: string, title?: string): void;
+    /**
+     * Every open tab of the ACTIVE session, plugin-layout and native alike.
+     * The plugin's reconciliation paths read this instead of the layout alone,
+     * which holds nothing while the native panel owns the right column.
+     */
+    listOpenTabs(): readonly SidebarTab[];
+    /**
+     * Whether opens land in DSH's native right Sidebar. False only while the
+     * native write face is absent (the plugin's own bottom workbench).
+     */
+    readonly native: boolean;
     /**
      * Install (or clear) the native right-Sidebar write face.
      * @internal Called once by the client half; not part of the consumer API.

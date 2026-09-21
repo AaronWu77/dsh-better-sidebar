@@ -131,6 +131,15 @@ export function BrowserView(props: TabComponentProps) {
     service.updateTab(tab.id, { path: nextUrl, title: host })
   }
 
+  // A tab opened STRAIGHT at a URL (an intercepted link, an agent push,
+  // another tab's address bar) already carries it as `path`: publish the
+  // host as the chip title now instead of waiting for a navigation inside
+  // the view. Mount only — navigateTo/history persist later moves.
+  useEffect(() => {
+    if (url !== undefined) persist(url)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const navigateTo = (raw: string): void => {
     const result = normalizeBrowserUrl(raw, window.location.origin, store.getPrefs().browserAllowedLoopback)
     if (result.kind === 'ok') {

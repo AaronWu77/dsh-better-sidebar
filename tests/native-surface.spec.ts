@@ -114,6 +114,7 @@ describe('service routing into the native surface', () => {
       update: tabId => tabId === 'native-1',
       activate: tabId => tabId === 'native-1',
       has: tabId => tabId === 'native-1',
+      openTabs: () => [],
     }
     const store = createSidebarStore()
     store.setSession('s1')
@@ -141,6 +142,40 @@ describe('service routing into the native surface', () => {
     const { service, calls } = mount()
     service.openTab({ type: 'editor', path: '/work/a.ts', title: 'a.ts' }, scope)
     expect(calls).toEqual([{ op: 'openResource', sessionId: 's1', address: 'addr://s1/work/work/a.ts', revealIfOpened: true }])
+  })
+  it('carries "open to the side" to the surface as preferNewPane', () => {
+    const { service, calls } = mount()
+    service.openTab({ type: 'terminal', preferNewPane: true }, scope)
+    expect(calls).toEqual([expect.objectContaining({ op: 'openTab', kind: 'terminal', preferNewPane: true })])
+  })
+
+  it('lets the side open duplicate a file so the split can land it', () => {
+    const { service, calls } = mount()
+    service.openTab({ type: 'editor', path: '/work/a.ts', title: 'a.ts', preferNewPane: true }, scope)
+    expect(calls).toEqual([{
+      op: 'openResource',
+      sessionId: 's1',
+      address: 'addr://s1/work/work/a.ts',
+      revealIfOpened: false,
+      preferNewPane: true,
+    }])
+  })
+
+  it('lists the native tabs of the active session next to the plugin-layout ones', () => {
+    const { service, surface } = mount()
+    const native: SidebarTab = { id: 'native-1', type: 'editor', title: 'a.ts', path: '/work/a.ts' }
+    service.setSurface({
+      ...surface,
+      openTabs: () => [
+        { id: 'native-1', sessionId: 's1', tab: native },
+        { id: 'native-2', sessionId: 'other', tab: { id: 'native-2', type: 'editor', title: 'b.ts', path: '/work/b.ts' } },
+      ],
+    })
+    expect(service.native).toBe(true)
+    expect(service.listOpenTabs()).toEqual([native])
+    service.setSurface(undefined)
+    expect(service.native).toBe(false)
+    expect(service.listOpenTabs()).toEqual([])
   })
 
   it('maps a path-less editor open to the files page kind', () => {
@@ -240,6 +275,7 @@ describe('service routing into the native surface', () => {
       update: () => false,
       activate: () => false,
       has: () => false,
+      openTabs: () => [],
     })
     service.openTab({ type: 'missing' }, scope)
     expect(calls).toEqual([])

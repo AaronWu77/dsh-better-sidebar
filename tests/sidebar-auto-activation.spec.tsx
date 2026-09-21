@@ -85,6 +85,7 @@ function makeNativeSurfaceSpy(): NativeSurfaceSpy {
       update: () => false,
       activate: () => false,
       has: () => false,
+      openTabs: () => [],
     },
   }
 }

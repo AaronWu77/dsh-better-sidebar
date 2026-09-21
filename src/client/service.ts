@@ -410,6 +410,13 @@ export interface OpenTabSeed {
   id?: string
   /** A URL the tab navigates to on mount (the browser tab's seed). */
   url?: string
+  /**
+   * Land the open in a NEW pane of the right column — the tree menu's "open
+   * to the side". The native surface splits the target pane when the layout
+   * allows it and falls back to the target pane; the plugin's own bottom
+   * workbench ignores it. `revealIfOpened` still governs de-duplication.
+   */
+  preferNewPane?: boolean
   /** JSON-serializable custom state carried on the minted tab (persisted across reloads; v0.12.0+). */
   meta?: unknown
   /**
@@ -438,6 +445,16 @@ export interface NativeTabParams {
   meta?: unknown
 }
 
+/** One live native tab, as the reconciliation paths read it. */
+export interface NativeOpenTab {
+  /** The native tab id (also the plugin-side record id). */
+  readonly id: string
+  /** The session whose panel holds the tab. */
+  readonly sessionId: string
+  /** The plugin-side record (title / path / meta as the components see it). */
+  readonly tab: SidebarTab
+}
+
 /**
  * The plugin's write face over DSH's native right Sidebar.
  *
@@ -450,9 +467,15 @@ export interface NativeTabParams {
  */
 export interface SidebarSurface {
   /** Open a page type in one session's native surface. */
-  openTab(input: { sessionId: string; kind: string; params: NativeTabParams; revealIfOpened: boolean }): void
+  openTab(input: { sessionId: string; kind: string; params: NativeTabParams; revealIfOpened: boolean; preferNewPane?: boolean }): void
   /** Open a resource address in one session's native surface. */
-  openResource(input: { sessionId: string; address: string; line?: number; revealIfOpened: boolean }): void
+  openResource(input: { sessionId: string; address: string; line?: number; revealIfOpened: boolean; preferNewPane?: boolean }): void
+  /**
+   * Every live native tab. The file-tree reconciliation paths enumerate
+   * these: a rename retargets and a delete closes the affected tabs whether
+   * the plugin's own layout or the native panel holds them.
+   */
+  openTabs(): readonly NativeOpenTab[]
   /** The file address of one path (the native surface owns the grammar). */
   fileAddress(sessionId: string, cwd: string | undefined, path: string): string
   /** Close one native tab; the closed record's type/title, or undefined when the id is not native. */
@@ -590,6 +613,17 @@ export interface BetterSidebarService {
   activateTab(tabId: string, scope?: SessionScope): void
   /** Open a file in the sidebar editor of `scope`'s session (title defaults to the file name). */
   openFile(scope: SessionScope, path: string, title?: string): void
+  /**
+   * Every open tab of the ACTIVE session, plugin-layout and native alike.
+   * The plugin's reconciliation paths read this instead of the layout alone,
+   * which holds nothing while the native panel owns the right column.
+   */
+  listOpenTabs(): readonly SidebarTab[]
+  /**
+   * Whether opens land in DSH's native right Sidebar. False only while the
+   * native write face is absent (the plugin's own bottom workbench).
+   */
+  readonly native: boolean
   /**
    * Install (or clear) the native right-Sidebar write face.
    * @internal Called once by the client half; not part of the consumer API.
@@ -922,12 +956,17 @@ export function createBetterSidebarService(store: SidebarStore): BetterSidebarSe
         ...(seed.diff === undefined ? {} : { diff: seed.diff }),
         ...(seed.meta === undefined && minted?.tab.meta === undefined ? {} : { meta: seed.meta ?? minted?.tab.meta }),
       }
+      // "Open to the side" asks for its own pane: the resource open then
+      // allows a duplicate (`revealIfOpened: false`) so the split lands the
+      // tab instead of focusing the copy already on screen.
+      const split = seed.preferNewPane === true ? { preferNewPane: true } : {}
       if (seed.type === 'editor') {
         if (seed.path !== undefined) {
           surface.openResource({
             sessionId: targetSessionId,
             address: surface.fileAddress(targetSessionId, scope?.cwd, seed.path),
-            revealIfOpened: true,
+            revealIfOpened: seed.preferNewPane !== true,
+            ...split,
           })
         } else {
           // The path-less editor window IS the file explorer.
@@ -948,6 +987,7 @@ export function createBetterSidebarService(store: SidebarStore): BetterSidebarSe
             ...(synthetic.meta === undefined ? {} : { meta: synthetic.meta }),
           },
           revealIfOpened,
+          ...split,
         })
       }
       // The native surface reports one open event, not create-vs-focus, so a
@@ -1130,6 +1170,18 @@ export function createBetterSidebarService(store: SidebarStore): BetterSidebarSe
     openTab({ type: 'editor', title: title ?? baseNameOf(path), path, id: `editor:${path}` }, scope)
   }
 
+  /** The plugin-layout tabs of the active session plus its native ones. */
+  const listOpenTabs = (): readonly SidebarTab[] => {
+    const snapshot = store.getSnapshot()
+    const state = snapshot.state
+    const local = state === undefined ? [] : allLeaves(state.bottomSplits).flatMap(leaf => leaf.tabs)
+    if (surface === undefined || snapshot.sessionId === undefined) return local
+    const native = surface.openTabs()
+      .filter(entry => entry.sessionId === snapshot.sessionId)
+      .map(entry => entry.tab)
+    return [...local, ...native]
+  }
+
   return {
     registerTab,
     registerFileViewer,
@@ -1155,6 +1207,8 @@ export function createBetterSidebarService(store: SidebarStore): BetterSidebarSe
     updateTab,
     activateTab,
     openFile,
+    listOpenTabs,
+    get native() { return surface !== undefined },
     setSurface: (next: SidebarSurface | undefined) => { surface = next },
   }
 }
