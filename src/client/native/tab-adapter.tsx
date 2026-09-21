@@ -29,6 +29,7 @@ import { OrphanedTab } from '../OrphanedTab.tsx'
 import { referenceInChat } from '../reference-in-chat.ts'
 import type { BetterSidebarService, NativeOpenTab } from '../service.ts'
 import type { SidebarStore, SidebarTab, TabType } from '../state.ts'
+import { createNativeTabStateStore, type NativeTabStateStore } from './tab-state.ts'
 import css from '../sidebar.module.css'
 
 /** The chip glyph's size: the tab strip's own icon scale. */
@@ -80,6 +81,8 @@ export interface NativeTabInfo {
 interface View {
   tab: SidebarTab
   scope: SessionScope
+  /** The native content address this record was minted from. */
+  address: string
   expanded: string[]
   revealed: string[]
   /** Bumped on every mutation; the components subscribe to it. */
@@ -102,6 +105,12 @@ export interface NativeTabRecords {
     params: NativeTabParams | undefined
     scope: SessionScope
     /**
+     * The native tab's content address (`useTabInfo().tab.contentId`). Empty
+     * when the caller has none (tests): the surface then never re-addresses
+     * the record.
+     */
+    address?: string
+    /**
      * The descriptor's own factory, called ONCE for a record that arrives
      * without seed fields (a native guide open, which knows nothing about the
      * plugin's per-instance minting): it supplies the title and the meta a
@@ -115,6 +124,10 @@ export interface NativeTabRecords {
   has(id: string): boolean
   /** Every live record, with the session whose panel holds it. */
   openTabs(): readonly NativeOpenTab[]
+  /** The native content address a record was minted from. */
+  addressOf(id: string): string | undefined
+  /** The session scope a record lives in. */
+  scopeOf(id: string): SessionScope | undefined
   /** Merge a patch into the synthetic record (the `updateTab` path). */
   update(id: string, patch: { title?: string; path?: string; meta?: unknown }): void
   /** Forget a record (the native tab closed). */
@@ -129,8 +142,14 @@ export interface NativeTabRecords {
   subscribe(listener: () => void): () => void
 }
 
-/** Create the record registry for one client activation. */
-export function createNativeTabRecords(): NativeTabRecords {
+/**
+ * Create the record registry for one client activation.
+ * @param memory - durable per-tab state restored across page reloads and host restarts.
+ * @returns the registry the native surface and every tab body share.
+ */
+export function createNativeTabRecords(
+  memory: NativeTabStateStore = createNativeTabStateStore(),
+): NativeTabRecords {
   const views = new Map<string, View>()
   const instances = new Map<string, number>()
   const listeners = new Set<() => void>()
@@ -139,29 +158,48 @@ export function createNativeTabRecords(): NativeTabRecords {
     views.set(id, { ...view, version: view.version + 1 })
     notify()
   }
+  /** Mirror one record into the cross-reload memory. */
+  const remember = (view: View): void => {
+    memory.remember(view.scope.sessionId, view.tab.id, {
+      ...(view.tab.path === undefined ? {} : { path: view.tab.path }),
+      ...(view.tab.title === undefined ? {} : { title: view.tab.title }),
+      ...(view.tab.meta === undefined ? {} : { meta: view.tab.meta }),
+      ...(view.tab.diff === undefined ? {} : { diff: view.tab.diff }),
+    })
+  }
   return {
-    ensure({ id, kind, title, params, scope, mint }) {
+    ensure({ id, kind, title, params, scope, address, mint }) {
       const existing = views.get(id)
       if (existing === undefined) {
-        const seeded = params?.title === undefined && params?.meta === undefined ? mint?.() : undefined
-        const meta = params?.meta ?? seeded?.meta
+        // Restoration: the native layout keeps the tab id across a reload, so
+        // a record arriving WITHOUT seed fields can be re-seeded from the
+        // plugin's own memory (the browser's URL, the side chat's thread, the
+        // diff reference). Recalled meta also suppresses the descriptor
+        // factory — a restored side chat must reattach, not mint a thread.
+        const recalled = memory.recall(scope.sessionId, id)
+        const seeded = params?.title === undefined && params?.meta === undefined && recalled?.meta === undefined
+          ? mint?.()
+          : undefined
+        const nextPath = params?.path ?? params?.url ?? recalled?.path
+        const nextMeta = params?.meta ?? recalled?.meta ?? seeded?.meta
+        const nextDiff = params?.diff ?? recalled?.diff
         const minted: View = {
           tab: {
             id,
             type: kind as TabType,
-            title: params?.title ?? seeded?.title ?? title,
-            ...(params?.path === undefined && params?.url === undefined
-              ? {}
-              : { path: params?.path ?? params?.url }),
-            ...(params?.diff === undefined ? {} : { diff: params.diff }),
-            ...(meta === undefined ? {} : { meta }),
+            title: params?.title ?? seeded?.title ?? recalled?.title ?? title,
+            ...(nextPath === undefined ? {} : { path: nextPath }),
+            ...(nextDiff === undefined ? {} : { diff: nextDiff }),
+            ...(nextMeta === undefined ? {} : { meta: nextMeta }),
           },
           scope,
+          address: address ?? '',
           expanded: [],
           revealed: [],
           version: 0,
         }
         views.set(id, minted)
+        remember(minted)
         return minted
       }
       // A navigation may carry new seed fields (the editor's in-place switch,
@@ -171,13 +209,11 @@ export function createNativeTabRecords(): NativeTabRecords {
       const nextPath = params?.path ?? params?.url
       if (nextPath !== undefined && nextPath !== existing.tab.path) patch.path = nextPath
       if (params?.diff !== undefined) patch.diff = params.diff
-      if (existing.scope.cwd !== scope.cwd) {
-        views.set(id, { ...existing, scope, tab: { ...existing.tab, ...patch } })
-        return views.get(id)!
-      }
-      if (Object.keys(patch).length === 0) return existing
-      const next: View = { ...existing, tab: { ...existing.tab, ...patch } }
+      const scopeMoved = existing.scope.cwd !== scope.cwd
+      if (Object.keys(patch).length === 0 && !scopeMoved) return existing
+      const next: View = { ...existing, scope, tab: { ...existing.tab, ...patch } }
       views.set(id, next)
+      if (Object.keys(patch).length > 0) remember(next)
       return next
     },
     get: id => views.get(id),
@@ -185,12 +221,18 @@ export function createNativeTabRecords(): NativeTabRecords {
     openTabs() {
       return [...views].map(([id, view]) => ({ id, sessionId: view.scope.sessionId, tab: view.tab }))
     },
+    addressOf: id => views.get(id)?.address,
+    scopeOf: id => views.get(id)?.scope,
     update(id, patch) {
       const entry = views.get(id)
       if (entry === undefined) return
-      put(id, { ...entry, tab: { ...entry.tab, ...patch } })
+      const next: View = { ...entry, tab: { ...entry.tab, ...patch } }
+      put(id, next)
+      remember(next)
     },
     drop(id) {
+      const entry = views.get(id)
+      if (entry !== undefined) memory.forget(entry.scope.sessionId, id)
       if (views.delete(id)) notify()
     },
     toggleExpanded(id, path) {
@@ -283,6 +325,7 @@ export function NativeTabBody(props: NativeBodyInjected & NativeBodyFrameworkPro
     title: nativeTab.title,
     params,
     scope,
+    address: nativeTab.contentId,
     mint: () => {
       const state = store.getSnapshot().state
       if (descriptor?.createTab === undefined || state === undefined) return undefined

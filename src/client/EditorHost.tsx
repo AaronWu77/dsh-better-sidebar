@@ -159,20 +159,26 @@ export function EditorHost(props: {
    * split mode opens a per-path dedupe tab through openSidebarFile.
    */
   const openFile = (absolute: string): void => {
-    // An address-backed tab (a file or folder window opened through
-    // `dsh-resource://file/...`) cannot switch in place: its native record is
-    // re-seeded from that address on every render, so an in-place path change
-    // snaps straight back. Switch in place only on the path-less explorer tab;
-    // every other tab opens (or focuses) its own per-path tab.
-    if (inPlace && path === '' && !isDir) {
+    // Merged mode: the CURRENT tab takes the file. The path-less explorer
+    // page rewrites its record in place; an address-backed file tab is
+    // re-addressed by the native surface (same pane, same strip slot, the
+    // old tab closes), so one tab follows the clicks. Split mode opens a
+    // per-path dedupe tab through openSidebarFile instead.
+    if (inPlace && !isDir) {
       ctx.get('betterSidebar')?.updateTab(tab.id, { path: absolute, title: baseName(absolute) })
     } else {
       openSidebarFile(ctx, store, scope.sessionId, absolute)
     }
   }
 
-  /** The context menu's explicit "new tab" escape (per-path dedupe). */
+  /** The context menu's explicit "new tab" escape: a tab of its own even
+   *  when the same file is already open (the native surface would focus it). */
   const openFileNewTab = (absolute: string): void => {
+    const service = ctx.get('betterSidebar')
+    if (service !== undefined && service.native) {
+      service.openTab({ type: 'editor', title: baseName(absolute), path: absolute, forceNewTab: true }, scope)
+      return
+    }
     openSidebarFile(ctx, store, scope.sessionId, absolute)
   }
 

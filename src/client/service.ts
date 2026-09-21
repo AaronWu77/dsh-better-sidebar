@@ -417,6 +417,12 @@ export interface OpenTabSeed {
    * workbench ignores it. `revealIfOpened` still governs de-duplication.
    */
   preferNewPane?: boolean
+  /**
+   * Open a FRESH tab even when this address is already open (the tree
+   * menu's "new tab" escape). Without it a native resource open focuses
+   * the copy already on screen instead of adding one.
+   */
+  forceNewTab?: boolean
   /** JSON-serializable custom state carried on the minted tab (persisted across reloads; v0.12.0+). */
   meta?: unknown
   /**
@@ -469,7 +475,13 @@ export interface SidebarSurface {
   /** Open a page type in one session's native surface. */
   openTab(input: { sessionId: string; kind: string; params: NativeTabParams; revealIfOpened: boolean; preferNewPane?: boolean }): void
   /** Open a resource address in one session's native surface. */
-  openResource(input: { sessionId: string; address: string; line?: number; revealIfOpened: boolean; preferNewPane?: boolean }): void
+  /**
+   * Open a resource address in one session's native surface. `replaceTab`
+   * takes that tab's place (its pane and its strip slot) and closes it in the
+   * same step — the only way to re-address a resource-backed tab, whose
+   * identity IS its address.
+   */
+  openResource(input: { sessionId: string; address: string; line?: number; params?: NativeTabParams; revealIfOpened: boolean; preferNewPane?: boolean; replaceTab?: string }): void
   /**
    * Every live native tab. The file-tree reconciliation paths enumerate
    * these: a rename retargets and a delete closes the affected tabs whether
@@ -960,12 +972,13 @@ export function createBetterSidebarService(store: SidebarStore): BetterSidebarSe
       // allows a duplicate (`revealIfOpened: false`) so the split lands the
       // tab instead of focusing the copy already on screen.
       const split = seed.preferNewPane === true ? { preferNewPane: true } : {}
+      const focusIfOpened = seed.preferNewPane !== true && seed.forceNewTab !== true
       if (seed.type === 'editor') {
         if (seed.path !== undefined) {
           surface.openResource({
             sessionId: targetSessionId,
             address: surface.fileAddress(targetSessionId, scope?.cwd, seed.path),
-            revealIfOpened: seed.preferNewPane !== true,
+            revealIfOpened: focusIfOpened,
             ...split,
           })
         } else {

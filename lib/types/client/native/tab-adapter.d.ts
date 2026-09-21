@@ -3,6 +3,7 @@ import type { Context } from '../../context-types.ts';
 import type { SessionScope } from '../api.ts';
 import type { BetterSidebarService, NativeOpenTab } from '../service.ts';
 import type { SidebarStore, SidebarTab } from '../state.ts';
+import { type NativeTabStateStore } from './tab-state.ts';
 /**
  * The plugin-side seed a native open carries in `navigation.params`.
  * JSON-shaped by convention (the native surface does not validate it).
@@ -44,6 +45,8 @@ export interface NativeTabInfo {
 interface View {
     tab: SidebarTab;
     scope: SessionScope;
+    /** The native content address this record was minted from. */
+    address: string;
     expanded: string[];
     revealed: string[];
     /** Bumped on every mutation; the components subscribe to it. */
@@ -65,6 +68,12 @@ export interface NativeTabRecords {
         params: NativeTabParams | undefined;
         scope: SessionScope;
         /**
+         * The native tab's content address (`useTabInfo().tab.contentId`). Empty
+         * when the caller has none (tests): the surface then never re-addresses
+         * the record.
+         */
+        address?: string;
+        /**
          * The descriptor's own factory, called ONCE for a record that arrives
          * without seed fields (a native guide open, which knows nothing about the
          * plugin's per-instance minting): it supplies the title and the meta a
@@ -81,6 +90,10 @@ export interface NativeTabRecords {
     has(id: string): boolean;
     /** Every live record, with the session whose panel holds it. */
     openTabs(): readonly NativeOpenTab[];
+    /** The native content address a record was minted from. */
+    addressOf(id: string): string | undefined;
+    /** The session scope a record lives in. */
+    scopeOf(id: string): SessionScope | undefined;
     /** Merge a patch into the synthetic record (the `updateTab` path). */
     update(id: string, patch: {
         title?: string;
@@ -98,8 +111,12 @@ export interface NativeTabRecords {
     /** Subscribe to record changes (title/path/meta/expanded). */
     subscribe(listener: () => void): () => void;
 }
-/** Create the record registry for one client activation. */
-export declare function createNativeTabRecords(): NativeTabRecords;
+/**
+ * Create the record registry for one client activation.
+ * @param memory - durable per-tab state restored across page reloads and host restarts.
+ * @returns the registry the native surface and every tab body share.
+ */
+export declare function createNativeTabRecords(memory?: NativeTabStateStore): NativeTabRecords;
 /** What a body registration injects (the plugin's business face). */
 export interface NativeBodyInjected {
     readonly sessionId: string;

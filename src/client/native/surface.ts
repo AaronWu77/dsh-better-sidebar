@@ -17,23 +17,23 @@
  * - layout state is memory-only, so a queued open is not durable either.
  */
 import type { Context } from '../../context-types.ts'
-import { fileAddressFor } from '../resource-address.ts'
+import { fileAddressFor, parseFileAddress } from '../resource-address.ts'
 import type { NativeTabParams, SidebarSurface } from '../service.ts'
 import type { NativeTabRecords } from './tab-adapter.tsx'
 
 /** One open the surface could not place yet. */
 type Pending =
   | { kind: 'tab'; sessionId: string; tabKind: string; params: NativeTabParams; revealIfOpened: boolean; preferNewPane: boolean }
-  | { kind: 'resource'; sessionId: string; address: string; line: number | undefined; revealIfOpened: boolean; preferNewPane: boolean }
+  | { kind: 'resource'; sessionId: string; address: string; line: number | undefined; params: NativeTabParams | undefined; revealIfOpened: boolean; preferNewPane: boolean; replaceTab?: string }
 
 /** The controller face this module uses (a structural slice of `ISidebarRight`). */
 interface NativeController {
   openTab(kind: string, options?: { params?: unknown; revealIfOpened?: boolean; preferNewPane?: boolean }): void
-  openResource(address: string, options?: { params?: unknown; revealIfOpened?: boolean; preferNewPane?: boolean }): void
+  openResource(address: string, options?: { params?: unknown; revealIfOpened?: boolean; preferNewPane?: boolean; replaceTab?: string }): void
   close(tabId: string): void
   /** Not part of `ISidebarRight`: the concrete controller's per-session writes. */
   openTabIn?(sessionId: string, kind: string, options?: { params?: unknown; revealIfOpened?: boolean; preferNewPane?: boolean }): void
-  openResourceIn?(sessionId: string, address: string, options?: { params?: unknown; revealIfOpened?: boolean; preferNewPane?: boolean }): void
+  openResourceIn?(sessionId: string, address: string, options?: { params?: unknown; revealIfOpened?: boolean; preferNewPane?: boolean; replaceTab?: string }): void
   closeIn?(sessionId: string, tabId: string): void
 }
 
@@ -87,9 +87,12 @@ export function createNativeSurface(ctx: Context, records: NativeTabRecords): Na
       return false
     }
     const options = {
-      ...(entry.line === undefined ? {} : { params: { line: entry.line } }),
+      ...(entry.line === undefined && entry.params === undefined
+        ? {}
+        : { params: { ...(entry.line === undefined ? {} : { line: entry.line }), ...entry.params } }),
       revealIfOpened: entry.revealIfOpened,
       ...entry.preferNewPane ? { preferNewPane: true } : {},
+      ...entry.replaceTab === undefined ? {} : { replaceTab: entry.replaceTab },
     }
     if (onScreen) {
       api.openResource(entry.address, options)
@@ -115,13 +118,25 @@ export function createNativeSurface(ctx: Context, records: NativeTabRecords): Na
   }
 
   const unsubscribe = ctx.sessions.list.subscribe(flushPending)
+  const openTab: NativeSurface['openTab'] = ({ sessionId, kind, params, revealIfOpened, preferNewPane = false }) => {
+    enqueue({ kind: 'tab', sessionId, tabKind: kind, params, revealIfOpened, preferNewPane })
+  }
+  const openResource: NativeSurface['openResource'] = ({ sessionId, address, line, params, revealIfOpened, preferNewPane = false, replaceTab }) => {
+    enqueue({
+      kind: 'resource',
+      sessionId,
+      address,
+      line,
+      params,
+      revealIfOpened,
+      preferNewPane,
+      ...(replaceTab === undefined ? {} : { replaceTab }),
+    })
+  }
+
   return {
-    openTab({ sessionId, kind, params, revealIfOpened, preferNewPane = false }) {
-      enqueue({ kind: 'tab', sessionId, tabKind: kind, params, revealIfOpened, preferNewPane })
-    },
-    openResource({ sessionId, address, line, revealIfOpened, preferNewPane = false }) {
-      enqueue({ kind: 'resource', sessionId, address, line, revealIfOpened, preferNewPane })
-    },
+    openTab,
+    openResource,
     fileAddress(sessionId, cwd, path) {
       return fileAddressFor(sessionId, cwd, path)
     },
@@ -138,6 +153,33 @@ export function createNativeSurface(ctx: Context, records: NativeTabRecords): Na
     },
     update(tabId, patch) {
       if (!records.has(tabId)) return false
+      // A path change on an ADDRESS-BACKED tab (a file resource) cannot be
+      // written into the record: the address re-seeds `path` on every
+      // render, so the write would snap straight back (rename retarget,
+      // merged-mode file switch). Take the tab's place instead — the
+      // native panel closes the old tab and opens the new address in the
+      // same pane and strip slot — carrying the record's meta so the
+      // editor keeps its dock state.
+      if (patch.path !== undefined && records.get(tabId)?.tab.path !== patch.path) {
+        const address = records.addressOf(tabId)
+        const scope = records.scopeOf(tabId)
+        if (address !== undefined && scope !== undefined && parseFileAddress(address) !== undefined) {
+          const next = fileAddressFor(scope.sessionId, scope.cwd, patch.path)
+          if (next !== address) {
+            const meta = records.get(tabId)?.tab.meta
+            openResource({
+              sessionId: scope.sessionId,
+              address: next,
+              revealIfOpened: false,
+              replaceTab: tabId,
+              ...(patch.title === undefined && meta === undefined
+                ? {}
+                : { params: { ...patch.title === undefined ? {} : { title: patch.title }, ...meta === undefined ? {} : { meta } } }),
+            })
+            return true
+          }
+        }
+      }
       records.update(tabId, patch)
       return true
     },
