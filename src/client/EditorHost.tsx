@@ -159,7 +159,12 @@ export function EditorHost(props: {
    * split mode opens a per-path dedupe tab through openSidebarFile.
    */
   const openFile = (absolute: string): void => {
-    if (inPlace) {
+    // An address-backed tab (a file or folder window opened through
+    // `dsh-resource://file/...`) cannot switch in place: its native record is
+    // re-seeded from that address on every render, so an in-place path change
+    // snaps straight back. Switch in place only on the path-less explorer tab;
+    // every other tab opens (or focuses) its own per-path tab.
+    if (inPlace && path === '' && !isDir) {
       ctx.get('betterSidebar')?.updateTab(tab.id, { path: absolute, title: baseName(absolute) })
     } else {
       openSidebarFile(ctx, store, scope.sessionId, absolute)

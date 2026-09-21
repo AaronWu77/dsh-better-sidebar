@@ -41,6 +41,12 @@ interface NativeTabRegistry {
     kind: string
     patterns?: readonly string[]
     priority?: 'extension' | 'builtin' | 'fallback'
+    /**
+     * Mint a DISTINCT address per open, so the kind can hold several tabs at
+     * once. Omitted, every open of the kind resolves to `page:<kind>` and the
+     * native surface focuses the first tab instead of opening a second one.
+     */
+    multiple?: boolean
     canOpen?: (address: string) => boolean
     title: (address: string) => string
     guide?: readonly { order: number; title: () => string; description?: () => string; icon?: unknown }[]
@@ -183,6 +189,14 @@ export function registerNativeSurface(deps: NativeSurfaceDeps): () => void {
         // An external implementation outranks the product's own viewers, which
         // is what lets the plugin's editor take over file addresses.
         priority: 'extension',
+        // Descriptors that mint a tab per open (browser, terminal, side chat,
+        // diff, and the per-path editor) must reach the native surface as
+        // multi-instance kinds; single-instance ones (git, subagent, the
+        // built-in files page) keep the shared page address.
+        ...(descriptor.single !== true
+          && (descriptor.createTab !== undefined || descriptor.dedupeKey !== undefined)
+          ? { multiple: true }
+          : {}),
         // A resource tab is titled by the file it shows; a page tab keeps the
         // descriptor's own title.
         title: (address: string) => (isEditor ? fileTitleOf(address) ?? titleOf(descriptor) : titleOf(descriptor)),
