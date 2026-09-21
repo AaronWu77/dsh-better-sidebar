@@ -120,7 +120,15 @@ export function BrowserView(props: TabComponentProps) {
   const persist = (nextUrl: string): void => {
     let host = nextUrl
     try { host = new URL(nextUrl).hostname } catch { /* keep the URL as title */ }
-    store.reduce(state => patchTab(state, tab.id, { path: nextUrl, title: host }))
+    // Route through the service: under the native right Sidebar the tab lives
+    // in the native record registry, so a raw store reduction retitles the
+    // plugin-layout tab only and every open page keeps the descriptor title.
+    const service = props.ctx.get('betterSidebar')
+    if (service === undefined) {
+      store.reduce(state => patchTab(state, tab.id, { path: nextUrl, title: host }))
+      return
+    }
+    service.updateTab(tab.id, { path: nextUrl, title: host })
   }
 
   const navigateTo = (raw: string): void => {
