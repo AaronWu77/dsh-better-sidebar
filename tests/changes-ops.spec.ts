@@ -19,12 +19,13 @@ function call(seq: number, name: string, callId: string, args: unknown, time = s
   return ev('tool/call', seq, time, { name, callId, arguments: JSON.stringify(args) })
 }
 
-/** A tool/result event carrying one tool-result block with inner text. */
+/** A tool/result event: the V4 tool-role message carries its blocks directly. */
 function result(seq: number, callId: string, text: string, isError = false, time = seq): SidebarSessionEvent {
   return ev('tool/result', seq, time, {
     message: {
       source: { kind: 'tool', callId },
-      content: [{ type: 'tool-result', isError, content: [{ type: 'text', text }] }],
+      content: [{ type: 'text', text }],
+      isError,
     },
   })
 }

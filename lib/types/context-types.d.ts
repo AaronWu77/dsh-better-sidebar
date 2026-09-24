@@ -425,22 +425,16 @@ export interface SidebarInvariantsService {
     /** Reserve one package's checks and install them in the service's child fiber. */
     register(packageName: string, installer: (ctx: Context, fail: (message: string) => never) => void | Promise<void>): () => void;
 }
-/** The settings service face (mirror of @deepseek-ai/dsh-settings' SettingsProvider). */
+/** The settings service face (mirror of @deepseek-ai/dsh-settings' SettingsForms). */
 export interface SidebarSettingsService {
     /**
-     * Register one namespace schema (the resolved value layers schema defaults,
-     * then the composition base, then the user document).
+     * Register the calling plugin instance's settings-page policy. `auto: false`
+     * suppresses the service-generated page when the plugin renders its own.
      */
-    register<T>(ns: string, schema: unknown, options?: {
-        base?: Partial<T>;
-        applies?: 'live' | 'restart';
-    }): {
-        get(): T;
-        watch(callback: (next: T, prev: T) => void | Promise<void>): () => void;
-        update(patch: object): Promise<void>;
-        replace(section: object): Promise<void>;
-    };
-    /** Redacted descriptors of every registered namespace (secrets stripped). */
+    configure(presentation: {
+        auto?: boolean;
+    }, owner?: unknown): () => void;
+    /** Redacted descriptors of every configurable plugin entry (secrets stripped). */
     describe(options?: {
         redactSecrets?: boolean;
     }): Array<{

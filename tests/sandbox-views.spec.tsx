@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Sandbox-contract tests for the two built-in web surfaces (HTML preview
  * iframe and the browser tab iframe). The iframe sandbox — opaque origin,

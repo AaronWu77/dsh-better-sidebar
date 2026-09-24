@@ -19,7 +19,7 @@ import { buildSidechatInheritance } from '../src/sidechat-core.ts'
 
 /** One live-style event with the surface marker message events carry, and
  *  the REAL message shapes the validator demands (id/role/source/content;
- *  tool/result messages carry role 'user' + one tool-result block). */
+ *  tool/result messages carry role 'tool' with the blocks directly). */
 function ev(type: string, seq: number, data: Record<string, unknown>): SidebarSessionEvent {
   const event: SidebarSessionEvent = { type, seq, time: seq * 1000, data }
   if (type === 'user/message' || type === 'assistant/message' || type === 'tool/result') {
@@ -185,9 +185,10 @@ describe('sidechat seed fork markers vs the reconstructed inbox', () => {
       turn: 2, step: 1,
       message: {
         id: 'm-r',
-        role: 'user',
-        content: [{ type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: 'ok' }] }],
+        role: 'tool',
+        content: [{ type: 'text', text: 'ok' }],
         source: { kind: 'tool', callId: 'c1' },
+        toolCallId: 'c1',
       },
     }),
     ev('agent/inbox/spliced', 15, {

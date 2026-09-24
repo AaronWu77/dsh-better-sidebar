@@ -36,11 +36,6 @@ export const LABEL_MAX_CHARS = 48
  *  the two plugins' threads render consistently in either UI). */
 export const SIDE_BOUNDARY_PREFIX = 'Side conversation boundary'
 
-/** The plugin identity stamped on the source of context-injection messages
- *  (boundary prompt + parked snapshot), so the transcript recognizes them
- *  structurally — not by text prefix. */
-export const SIDE_INJECTION_PLUGIN = 'dsh-better-sidebar'
-
 /**
  * The boundary prompt delivered as the thread's first user message: the
  * inherited seed is reference context only, never active instruction.
@@ -228,8 +223,7 @@ export function hasDanglingToolCall(events: readonly SidechatLogEvent[], turnSta
   return pending.size > 0
 }
 
-/** The plain text of one tool/result message (text blocks inside its
- *  `tool-result` content block). */
+/** The plain text of one tool/result message (its text content blocks). */
 function toolResultText(data: Record<string, unknown>): string {
   const message = data.message as { content?: unknown } | undefined
   const content = message?.content
@@ -237,22 +231,15 @@ function toolResultText(data: Record<string, unknown>): string {
   const parts: string[] = []
   for (const block of content) {
     if (block === null || typeof block !== 'object') continue
-    const candidate = block as { type?: unknown; content?: unknown }
-    if (candidate.type !== 'tool-result') continue
-    const inner = candidate.content
-    if (!Array.isArray(inner)) continue
-    for (const item of inner) {
-      if (item === null || typeof item !== 'object') continue
-      const textItem = item as { type?: unknown; text?: unknown }
-      if (textItem.type === 'text' && typeof textItem.text === 'string') {
-        parts.push(textItem.text)
-      }
+    const candidate = block as { type?: unknown; text?: unknown }
+    if (candidate.type === 'text' && typeof candidate.text === 'string') {
+      parts.push(candidate.text)
     }
   }
   return parts.join('\n')
 }
 
-/** Cap applied to one tool-result's text inside a snapshot (prompt budget). */
+/** Cap applied to one tool result's text inside a snapshot (prompt budget). */
 const SNAPSHOT_RESULT_CAP = 2000
 /** Cap applied to the whole snapshot (prompt budget). */
 const SNAPSHOT_TOTAL_CAP = 8000

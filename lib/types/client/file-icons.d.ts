@@ -32,7 +32,7 @@ export declare function builtinFileIcon(path: string, size: number): ReactNode;
  * A directory row: the host's folder glyph.
  *
  * The host ships ONE folder drawing (`kind: 'folder'` resolves to its
- * monochrome `IconFolderClose16`, which rides `currentColor` and therefore
+ * monochrome `IconFolderCloseRegular`, which rides `currentColor` and therefore
  * still follows the skin), and the classifier never returns a folder kind of
  * its own. The expansion state is already legible from the tree's own chevron
  * and row affordances, so this deliberately does not invent a second folder

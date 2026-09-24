@@ -29,16 +29,16 @@ import clsx from 'clsx'
 import {
   ConnectionIndicator,
   DiffBlock,
-  IconApiOutline14,
-  IconBrowseOutline16,
-  IconChevronRightOutline14,
-  IconEditOutline16,
-  IconNewChatOutline16,
-  IconPlusOutline16,
-  IconSearchOutline16,
-  IconSendOutline16,
-  IconSparkle16,
-  IconStopFill16,
+  IconApiOutlineRegular,
+  IconBrowseOutlineRegular,
+  IconChevronRightOutlineRegular,
+  IconEditOutlineRegular,
+  IconNewChatOutlineRegular,
+  IconPlusOutlineRegular,
+  IconSearchOutlineRegular,
+  IconSendOutlineRegular,
+  IconSparkleRegular,
+  IconStopFillRegular,
   MarkdownText,
   Menu,
   ReadBlock,
@@ -198,7 +198,7 @@ function CollapsibleRow(props: {
         )}
       >
         <span className={css.sidechatRowChevron}>
-          <IconChevronRightOutline14 size={12} />
+          <IconChevronRightOutlineRegular size={12} />
         </span>
         {leading}
         {label}
@@ -239,19 +239,19 @@ function toolLeading(name: string, failed: boolean): React.ReactNode {
   switch (name) {
     case 'bash':
     case 'pwsh':
-      return <IconApiOutline14 size={14} />
+      return <IconApiOutlineRegular size={14} />
     case 'read':
     case 'web_fetch':
-      return <IconBrowseOutline16 size={14} />
+      return <IconBrowseOutlineRegular size={14} />
     case 'edit':
     case 'write':
-      return <IconEditOutline16 size={14} />
+      return <IconEditOutlineRegular size={14} />
     case 'grep':
     case 'glob':
     case 'web_search':
-      return <IconSearchOutline16 size={14} />
+      return <IconSearchOutlineRegular size={14} />
     default:
-      return <IconSparkle16 size={14} />
+      return <IconSparkleRegular size={14} />
   }
 }
 
@@ -344,6 +344,10 @@ export function SideChatView(props: {
       collapseAria: t('sideChatBlockCollapseAria'),
       expand: (hidden: number) => t('sideChatBlockExpand', { hidden }),
       expandAria: (hidden: number) => t('sideChatBlockExpandAria', { hidden }),
+      // Code-toolbar chrome the DiffBlock/ReadBlock primitives require.
+      codeLabel: t('sideChatBlockCode'),
+      wrapLabel: t('sideChatBlockWrap'),
+      unwrapLabel: t('sideChatBlockUnwrap'),
     }
     return {
       copyLabel: t('copy'),
@@ -354,6 +358,10 @@ export function SideChatView(props: {
         ...shared,
         signal: (signal: string) => t('sideChatBlockSignal', { signal }),
         exitCode: (exitCode: number) => t('sideChatBlockExitCode', { code: exitCode }),
+        // No dedicated copy key: a settle without an exit code is reported
+        // with the existing localized failure pill (avoids a new key across
+        // every shipped dictionary).
+        noExitCode: t('sideChatBlockFailed'),
         running: t('sideChatBlockRunning'),
         failed: t('sideChatBlockFailed'),
         done: t('sideChatBlockDone'),
@@ -593,7 +601,7 @@ export function SideChatView(props: {
 
   const menuItems = useMemo<MenuEntry[]>(() => {
     const items: MenuEntry[] = [
-      { id: '$new', label: t('sideChatNew'), icon: <IconPlusOutline16 /> },
+      { id: '$new', label: t('sideChatNew'), icon: <IconPlusOutlineRegular size={16} /> },
     ]
     if (threads.length > 0) {
       items.push({ type: 'separator', id: '$sep' })
@@ -674,7 +682,7 @@ export function SideChatView(props: {
     return (
       <div className={css.sidechat}>
         <div className={css.sidechatHero}>
-          <IconNewChatOutline16 />
+          <IconNewChatOutlineRegular size={16} />
           <div
             className={clsx(
               css.sidechatHeroTitle,
@@ -739,7 +747,6 @@ export function SideChatView(props: {
         <ConnectionIndicator
           state={connectionState}
           disconnectedLabel={t('sideChatConnDisconnected')}
-          reconnectLabel={t('sideChatConnReconnect')}
           connectingLabel={t('sideChatConnConnecting')}
           recoveredLabel={t('sideChatConnRecovered')}
           reconnectActionLabel={t('sideChatConnReconnectAction')}
@@ -791,7 +798,7 @@ export function SideChatView(props: {
               disabled={busy !== null}
               title={t('sideChatCancelTitle')}
             >
-              <IconStopFill16 />
+              <IconStopFillRegular size={16} />
             </button>
           ) : (
             <button
@@ -802,7 +809,7 @@ export function SideChatView(props: {
               disabled={composer.trim() === '' || busy !== null}
               title={t('sideChatSend')}
             >
-              <IconSendOutline16 />
+              <IconSendOutlineRegular size={16} />
             </button>
           )}
         </div>

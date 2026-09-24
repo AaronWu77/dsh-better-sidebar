@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Markdown preview copy-label spec: the fence copy buttons ("复制" / "Copy")
  * must follow the DSH locale service through `codeLabels` — the DSH

@@ -5,6 +5,10 @@
  * direct `slots.register` races the declaration and the ui-slots core throws
  * "not declared (a parent entry's children table must declare it)".
  *
+ * The slot is a LIST in Session V4 (select is chain-only), so the component
+ * computes its own match and returns null when the turn produced nothing or
+ * the row declines; the tests call the registered component directly.
+ *
  * The fake `slots` mirrors SlotRegistry.inject's semantics: run the callback
  * synchronously when the slot is already declared; otherwise wait and run it
  * when the declaration commits; the returned disposer cancels a pending wait
@@ -87,19 +91,24 @@ const clientCtx = (slots: unknown): Context => {
   } as unknown as Context
 }
 
+/** The registered component, typed for a direct call. */
+type RowComponent = (props: Record<string, unknown>) => unknown
+
 describe('turn-tail interception registration (issue #15)', () => {
   it('registers through slots.inject and lands once the slot is already declared', () => {
     const fake = fakeSlots(true)
     const store = createSidebarStore()
     const restore = registerTurnTailInterception(clientCtx(fake.slots), store)
 
-    // Exactly one registration, with the takeover descriptor.
+    // Exactly one registration, with the list-entry descriptor.
     expect(fake.registered).toHaveLength(1)
     const { options, component } = fake.registered[0]!
     expect(options.name).toBe('conversation.chat.turnTail')
+    expect(options.id).toBe('dsh-better-sidebar:turn-tail')
     expect(options.priority).toBe(-1)
     expect(options.registrant).toBe('dsh-better-sidebar')
-    expect(options.select).toBeTypeOf('function')
+    // A list slot takes no chain selector; the component matches on its own.
+    expect(options.select).toBeUndefined()
     expect(options.inject).toBeTypeOf('function')
     expect(component).toBeTypeOf('function')
 
@@ -142,42 +151,52 @@ describe('turn-tail interception registration (issue #15)', () => {
     expect(fake.registered).toHaveLength(0)
   })
 
-  it('declines the takeover while the editor tab is disabled in the settings', () => {
+  it('computes the match in the component and declines while the row is off', () => {
     const fake = fakeSlots(true)
     const store = createSidebarStore()
     const restore = registerTurnTailInterception(clientCtx(fake.slots), store)
-    const select = fake.registered[0]!.options.select as (owner: unknown) => unknown
+    const component = fake.registered[0]!.component as RowComponent
+    const inject = fake.registered[0]!.options.inject as (sessionId: string) => Record<string, unknown>
+    const seat = inject('s1')
 
-    // Enabled (default): a produced turn claims the chain; an empty one declines.
-    expect(select(producedOwner(['a.ts', 'b.ts']))).toEqual(['a.ts', 'b.ts'])
-    expect(select(emptyOwner())).toBeNull()
+    // Enabled (default): a produced turn renders chips; an empty one declines.
+    expect(component({ ...(producedOwner(['a.ts', 'b.ts']) as Record<string, unknown>), ...seat })).not.toBeNull()
+    expect(component({ ...(emptyOwner() as Record<string, unknown>), ...seat })).toBeNull()
     // The engine Turn data path (the real owner currency: { turn, seq,
     // openFile }) claims through the deliverables record too.
-    expect(select({
+    expect(component({
       turn: { data: { get: (key: string) => key === 'deliverables' ? { produced: [{ seq: 1, path: 'a.ts' }] } : undefined } },
       seq: 1,
-    })).toEqual(['a.ts'])
+      ...seat,
+    })).not.toBeNull()
 
-    // Editor tab disabled: even a produced turn falls back to the default
-    // deliverables row (chips that cannot open must not be offered).
+    // Editor tab disabled: even a produced turn renders nothing (chips that
+    // cannot open must not be offered).
     store.setPrefs({ ...store.getPrefs(), tabsEnabled: { editor: false } })
-    expect(select(producedOwner(['a.ts']))).toBeNull()
+    expect(component({ ...(producedOwner(['a.ts']) as Record<string, unknown>), ...seat })).toBeNull()
+
+    // Externally disabled sidebar (aionui-panel chosen): nothing renders either.
+    store.setPrefs({ ...store.getPrefs(), tabsEnabled: {} })
+    store.setSuspended(true)
+    expect(component({ ...(producedOwner(['a.ts']) as Record<string, unknown>), ...seat })).toBeNull()
 
     restore()
   })
 
-  it('wires the openInSidebar and onShowInFolder seats', () => {
+  it('wires the store, openInSidebar, and onShowInFolder seats', () => {
     const fake = fakeSlots(true)
     const ctx = clientCtx(fake.slots)
     const store = createSidebarStore()
     const restore = registerTurnTailInterception(ctx, store)
     const inject = fake.registered[0]!.options.inject as (sessionId: string) => {
+      store: unknown
       openInSidebar: (path: string) => void
       onShowInFolder: (files: readonly string[]) => void
     }
 
-    // The seat hands the session-scoped opener to the chips row.
+    // The seat hands the session-scoped opener and the shared store to the row.
     const seat = inject('s1')
+    expect(seat.store).toBe(store)
     expect(seat.openInSidebar).toBeTypeOf('function')
     seat.openInSidebar('/w/src/a.ts')
     expect(ctx.betterSidebar.openTab).toHaveBeenCalledWith({

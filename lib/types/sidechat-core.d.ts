@@ -31,10 +31,6 @@ export declare const LABEL_MAX_CHARS = 48;
  *  rows starting with it (same first line as dsh-sidechain's boundary, so
  *  the two plugins' threads render consistently in either UI). */
 export declare const SIDE_BOUNDARY_PREFIX = "Side conversation boundary";
-/** The plugin identity stamped on the source of context-injection messages
- *  (boundary prompt + parked snapshot), so the transcript recognizes them
- *  structurally — not by text prefix. */
-export declare const SIDE_INJECTION_PLUGIN = "dsh-better-sidebar";
 /**
  * The boundary prompt delivered as the thread's first user message: the
  * inherited seed is reference context only, never active instruction.

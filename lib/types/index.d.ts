@@ -1,5 +1,6 @@
 import type { Context } from './context-types.ts';
-import { Config, type ResolvedSidebarConfig, type SidebarConfig } from './config.ts';
+import { Config, type ResolvedSidebarConfig, type SidebarConfig, type VolatileConfig } from './config.ts';
+import './message-source.ts';
 export { Config };
 export type { SidebarConfig, ResolvedSidebarConfig };
 export type { Context } from './context-types.ts';
@@ -44,7 +45,7 @@ export interface SidebarSettingsFace {
  * {@link Config} and fills defaults, direct callers get them from
  * {@link resolveSidebarConfig}.
  */
-export declare function apply(ctx: Context, config?: SidebarConfig): void;
+export declare function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): void;
 /**
  * The WS close reason for a failed terminal attach. A missing configured
  * shell gets a SHORT machine-readable marker (`shell-not-found:<name>`,

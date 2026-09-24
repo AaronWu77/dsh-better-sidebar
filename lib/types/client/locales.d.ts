@@ -380,6 +380,9 @@ export declare const zh: {
     sideChatBlockFailed: string;
     sideChatBlockDone: string;
     sideChatBlockNoOutput: string;
+    sideChatBlockCode: string;
+    sideChatBlockWrap: string;
+    sideChatBlockUnwrap: string;
     sideChatBlockFiles: string;
     sideChatBlockWindow: string;
     sideChatConnDisconnected: string;

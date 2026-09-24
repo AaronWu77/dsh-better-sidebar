@@ -21,13 +21,14 @@ import { WebSocket, WebSocketServer } from 'ws'
 import type { Context, SidebarHttpRequest, SidebarSessionEvent } from './context-types.ts'
 import {
   Config,
-  PrefsSchema,
+  readPrefs,
   resolveSidebarConfig,
   SIDEBAR_PREFS_DEFAULTS,
   SIDEBAR_PREFS_NS,
   type ResolvedSidebarConfig,
   type SidebarConfig,
   type SidebarPrefs,
+  type VolatileConfig,
 } from './config.ts'
 import { parentOf, requireAbsolute, listDirectory, rootLabel } from './fs-tree.ts'
 import { resolveSessionPath } from './session-path.ts'
@@ -57,6 +58,11 @@ import { buildSidechatApi } from './sidechat-routes.ts'
 import { createAssistantLiveBuffer, type AssistantLiveBuffer } from './assistant-live.ts'
 import { readJsonBody, requireString, SidebarError, writeError, writeJson, writeOk } from './wire.ts'
 import { readPersistedSession } from './session-store.ts'
+// Register this plugin's producer-owned message source kind ('dsh-better-sidebar')
+// for the injected Side Chat boundary message; DSH Session V4 refuses the
+// retired `kind: 'plugin'` wrapper. Side-effect import: the augmentation must
+// be in the program.
+import './message-source.ts'
 
 export { Config }
 export type { SidebarConfig, ResolvedSidebarConfig }
@@ -719,7 +725,7 @@ function buildApi(
  * {@link Config} and fills defaults, direct callers get them from
  * {@link resolveSidebarConfig}.
  */
-export function apply(ctx: Context, config?: SidebarConfig): void {
+export function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): void {
   // pnpm strips the executable bit from node-pty's prebuilt spawn-helper;
   // restore it before any terminal can spawn (idempotent).
   ensureSpawnHelper()
@@ -764,13 +770,14 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
   const agentOpenRegistry = new AgentOpenRegistry()
 
   // ── User-facing "Side card" preferences ──────────────────────────────────
-  // Register the namespace with the settings provider so the Settings page
-  // (client half) can render and persist the new-conversation defaults. The
-  // DSH settings RPC domain (api-proxy) only serves allowlisted namespaces to
-  // configuration clients, so the client reaches this namespace through the
-  // plugin's own fenced routes below ('settings.get'/'settings.update'),
-  // which call the seam in-process. Deployments without a settings service
-  // simply never fill the face and the client falls back to the defaults.
+  // The prefs are live (volatile) fields of this plugin's Config (config.ts),
+  // so DSH 0.1.7's settings service serves and edits them as this plugin's
+  // namespace. The DSH settings RPC domain (api-proxy) only serves allowlisted
+  // namespaces to configuration clients, so the client reaches this namespace
+  // through the plugin's own fenced routes below ('settings.get' /
+  // 'settings.update'), which call the seam in-process. Deployments without a
+  // settings service simply never fill the face and the client falls back to
+  // the defaults.
   let settingsFace: SidebarSettingsFace | undefined
   // The model-facing terminal tools are gated on the side-card setting
   // `agentTerminalTools` (default off): nothing is injected until the user
@@ -798,20 +805,44 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
       agentPtyRegistry?.disposeAll()
     }
   }
-  ctx.inject(['settings'], (sctx) => {
-    // DSH 0.1.2-alpha.2 validates namespaces at compile time
-    // (SettingsNamespaceInput); the 'dsh-better-sidebar' literal passes, so the
-    // runtime helper this used to call (settingsNamespace) is gone upstream.
-    const ns = SIDEBAR_PREFS_NS
-    // The structural settings mirror types `schema` as unknown, so the
-    // generic is not inferred here; the real service resolves it from the
-    // schemastery schema (PrefsSchema) — narrow the owner scope explicitly.
-    const scope = sctx.settings.register(ns, PrefsSchema) as {
-      get(): SidebarPrefs
-      watch(callback: (next: SidebarPrefs, prev: SidebarPrefs) => void): () => void
+  ctx.inject(['settings'], (injected) => {
+    // DSH 0.1.7 serves a plugin's settings form from the volatile fields of
+    // its Config: the side-card prefs are live Config fields now (config.ts),
+    // and the namespace is the profile entry id. Match the declared constant
+    // first, then the live form by a field only this plugin declares.
+    const sctx = injected as unknown as Context
+    ctx.effect(
+      () => sctx.settings.configure({ auto: false }, ctx.fiber),
+      'dsh-better-sidebar: custom settings page policy',
+    )
+    const ownNs = (): string => {
+      const descriptors = sctx.settings.describe({ redactSecrets: true })
+      const declared = descriptors.find(candidate => candidate.ns === SIDEBAR_PREFS_NS)
+      if (declared !== undefined) return declared.ns
+      const matched = descriptors.find((candidate) => {
+        const value = candidate.value
+        return typeof value === 'object' && value !== null && Object.hasOwn(value, 'autoOpenSubagent')
+      })
+      return matched?.ns ?? SIDEBAR_PREFS_NS
+    }
+    const readCurrent = (): SidebarPrefs => readPrefs(config)
+    const scope = {
+      get: readCurrent,
+      watch: (callback: (next: SidebarPrefs, prev: SidebarPrefs) => void): (() => void) => {
+        let previous = readCurrent()
+        return (ctx.on as unknown as (event: string, listener: (ns: string) => void) => () => void)(
+          'settings/document-updated',
+          (updatedNs) => {
+            if (updatedNs !== ownNs()) return
+            const next = readCurrent()
+            callback(next, previous)
+            previous = next
+          },
+        )
+      },
     }
     const viewOf = (): { value?: unknown; revision?: number } => {
-      const descriptor = sctx.settings.describe({ redactSecrets: true }).find(candidate => candidate.ns === ns)
+      const descriptor = sctx.settings.describe({ redactSecrets: true }).find(candidate => candidate.ns === ownNs())
       return descriptor === undefined
         ? { value: undefined, revision: undefined }
         : { value: descriptor.value, revision: descriptor.revision }
@@ -831,7 +862,7 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
       get: viewOf,
       externalDisable,
       update: async (patch, expectedRevision) => {
-        await sctx.settings.update(ns, patch, expectedRevision)
+        await sctx.settings.update(ownNs(), patch, expectedRevision)
         return viewOf()
       },
     }
@@ -868,8 +899,10 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
     syncOpenToolsGate()
     // ONE watch subscription drives both gates: settings commits re-evaluate
     // the terminal tools AND the open tool together (each gate is idempotent
-    // and owns its own disposer).
+    // and owns its own disposer). The loader's volatile HMR (a profile edit)
+    // re-evaluates too, since it does not always update the settings document.
     scope.watch(() => { syncToolsGate(scope); syncOpenToolsGate() })
+    ctx.on('loader/volatile-update', () => { syncToolsGate(scope); syncOpenToolsGate() })
   })
 
   // ── JSON API ────────────────────────────────────────────────────────────

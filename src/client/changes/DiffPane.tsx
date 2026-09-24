@@ -9,7 +9,7 @@
  * diff tab via the shell.
  */
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import { IconCloseOutline16, IconRefreshOutline16, IconRightUpOutline16, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconCloseOutlineRegular, IconRefreshOutlineRegular, IconRightUpOutlineRegular, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionScope } from '../api.ts'
 import { api, htmlUrl } from '../api.ts'
 import { t } from '../locales.ts'
@@ -492,7 +492,7 @@ export function DiffPane({ target, scope, height, onHeightCommit, onClose, onExp
               disabled={loading}
               onClick={() => { setTick(value => value + 1) }}
             >
-              <IconRefreshOutline16 size={14} />
+              <IconRefreshOutlineRegular size={14} />
             </button>
             <button
               type="button"
@@ -501,7 +501,7 @@ export function DiffPane({ target, scope, height, onHeightCommit, onClose, onExp
               title={t('changesOpenDiffTab')}
               onClick={onExpand}
             >
-              <IconRightUpOutline16 size={14} />
+              <IconRightUpOutlineRegular size={14} />
             </button>
           </>
         )}
@@ -544,7 +544,7 @@ export function DiffPane({ target, scope, height, onHeightCommit, onClose, onExp
           title={t('changesClosePreview')}
           onClick={onClose}
         >
-          <IconCloseOutline16 size={14} />
+          <IconCloseOutlineRegular size={14} />
         </button>
       </div>
       {target.kind === 'op' && htmlOp && rendering && htmlRenderSrc !== ''

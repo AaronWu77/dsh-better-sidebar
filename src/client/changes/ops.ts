@@ -74,42 +74,24 @@ function pathOf(args: Record<string, unknown>): string | undefined {
 interface ToolResultMessageLike {
   source?: { kind?: unknown; callId?: unknown }
   content?: unknown
-}
-
-/** One 'tool-result' content block (inner blocks carry the text). */
-interface ToolResultBlockLike {
-  type?: unknown
-  content?: unknown
   isError?: unknown
 }
 
-/** The finalized plain text of one tool result (inner text blocks joined). */
+/** The finalized plain text of one tool result (its text content blocks joined). */
 function resultText(message: ToolResultMessageLike): string | undefined {
   if (!Array.isArray(message.content)) return undefined
   const parts: string[] = []
   for (const block of message.content) {
     if (block === null || typeof block !== 'object') continue
-    const candidate = block as ToolResultBlockLike
-    if (candidate.type !== 'tool-result') continue
-    const inner = candidate.content
-    if (!Array.isArray(inner)) continue
-    for (const item of inner) {
-      if (item === null || typeof item !== 'object') continue
-      const textItem = item as { type?: unknown; text?: unknown }
-      if (textItem.type === 'text' && typeof textItem.text === 'string') parts.push(textItem.text)
-    }
+    const candidate = block as { type?: unknown; text?: unknown }
+    if (candidate.type === 'text' && typeof candidate.text === 'string') parts.push(candidate.text)
   }
   return parts.length > 0 ? parts.join('\n') : undefined
 }
 
-/** Whether a tool result reported an error (the inner block's isError flag). */
+/** Whether a tool result reported an error (the message's isError flag). */
 function resultIsError(message: ToolResultMessageLike): boolean {
-  if (!Array.isArray(message.content)) return false
-  return message.content.some((block) => {
-    if (block === null || typeof block !== 'object') return false
-    return (block as ToolResultBlockLike).type === 'tool-result'
-      && (block as ToolResultBlockLike).isError === true
-  })
+  return message.isError === true
 }
 
 /**

@@ -58,12 +58,8 @@ function jobOutputResult(seq: number, callId: string, text: string, over: { isEr
     data: {
       message: {
         source: { kind: 'tool', callId },
-        content: [{
-          type: 'tool-result',
-          toolCallId: callId,
-          isError: over.isError === true,
-          content: [{ type: 'text', text }],
-        }],
+        content: [{ type: 'text', text }],
+        isError: over.isError === true,
       },
     },
   }

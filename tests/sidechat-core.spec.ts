@@ -20,7 +20,6 @@ import {
   threadHasCompletedTurn,
   threadTrailingPending,
   SIDE_BOUNDARY_PROMPT,
-  SIDE_INJECTION_PLUGIN,
   SIDE_LABEL_PREFIX,
   type SeedEvent,
 } from '../src/sidechat-core.ts'
@@ -72,7 +71,8 @@ function completedTurn(seq: number, turn: number, over: {
       step: 1,
       message: {
         source: { kind: 'tool', callId: tool.callId },
-        content: [{ type: 'tool-result', toolCallId: tool.callId, isError: false, content: [{ type: 'text', text: tool.result ?? 'ok' }] }],
+        content: [{ type: 'text', text: tool.result ?? 'ok' }],
+        isError: false,
       },
     }))
   }
@@ -127,7 +127,7 @@ describe('buildSidechatInheritance', () => {
         step: 1,
         message: {
           source: { kind: 'tool', callId: 'c1' },
-          content: [{ type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: 'ok' }] }],
+          content: [{ type: 'text', text: 'ok' }],
         },
       }),
       ev('assistant/message', 5, { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'a' }] } }),
@@ -183,7 +183,7 @@ describe('buildSidechatInheritance', () => {
         step: 1,
         message: {
           source: { kind: 'tool', callId: 'c1' },
-          content: [{ type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: 'hit' }] }],
+          content: [{ type: 'text', text: 'hit' }],
         },
       }),
       ev('assistant/message', 5, { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'found it' }] }, stream: [] }),
@@ -248,7 +248,7 @@ describe('buildOpenTurnSnapshot', () => {
         step: 1,
         message: {
           source: { kind: 'tool', callId: 'c1' },
-          content: [{ type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: 'file body' }] }],
+          content: [{ type: 'text', text: 'file body' }],
         },
       }),
       ev('tool/call', 7, { turn: 1, step: 1, callId: 'c2', name: 'bash', arguments: '{"cmd":"long"}' }),
@@ -357,10 +357,10 @@ describe('boundaryDelivered', () => {
 })
 
 describe('isContextInjectionMessage', () => {
-  it('recognizes plugin-stamped sources structurally', () => {
+  it('recognizes non-user sources structurally', () => {
     expect(isContextInjectionMessage({
       content: [{ type: 'text', text: 'runtime context' }],
-      source: { kind: 'plugin', plugin: SIDE_INJECTION_PLUGIN },
+      source: { kind: 'dsh-better-sidebar' },
     })).toBe(true)
     expect(isContextInjectionMessage({
       content: [{ type: 'text', text: 'q' }],

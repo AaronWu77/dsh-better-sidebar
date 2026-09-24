@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
 import { SettingsConflictError, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import { PrefsSchema, SIDEBAR_PREFS_NS } from '../src/config.ts'
 import { apply, mediaTypeForPath, wsCloseReasonOf } from '../src/index.ts'
 import { SidebarError } from '../src/wire.ts'
 import { encodeHtmlUrl } from '../src/html-route.ts'
@@ -828,7 +829,7 @@ describe('session cwd resolution over the API route', () => {
 })
 
 describe('side card settings routes', () => {
-  /** A minimal settings seam: register/describe/update with the revision guard. */
+  /** A minimal 0.1.7 settings seam: configure/describe/update with the revision guard. */
   const createFakeSettings = (pre?: Record<string, Record<string, unknown>>) => {
     const namespaces = new Map<string, {
       schema: unknown
@@ -838,18 +839,19 @@ describe('side card settings routes', () => {
     for (const [ns, value] of Object.entries(pre ?? {})) {
       namespaces.set(ns, { schema: (input: unknown) => input, value, revision: 0 })
     }
+    // The plugin's Config owns the namespace in 0.1.7; seed the prefs schema so
+    // the route serves the same defaulted values the old register() produced.
+    namespaces.set(SIDEBAR_PREFS_NS, {
+      schema: PrefsSchema,
+      value: namespaces.get(SIDEBAR_PREFS_NS)?.value,
+      revision: 0,
+    })
     const resolve = (entry: { schema: unknown; value: Record<string, unknown> | undefined }): unknown => {
       const schema = entry.schema as (input: unknown) => unknown
       return entry.value === undefined ? schema(undefined) : schema(entry.value)
     }
     return {
-      register(ns: string, schema: unknown) {
-        // Preserve a pre-seeded value: tests stage prefs through the `pre`
-        // map before the plugin mounts and registers the same namespace.
-        const existing = namespaces.get(ns)
-        namespaces.set(ns, { schema, value: existing?.value ?? undefined, revision: 0 })
-        return { get: () => ({}), watch: () => () => {}, update: async () => {}, replace: async () => {} }
-      },
+      configure() { return () => {} },
       describe() {
         return [...namespaces.entries()].map(([ns, entry]) => ({
           ns,
@@ -1149,17 +1151,13 @@ describe('agent terminal tool gating', () => {
     // A ref container: the watch callback is only assigned inside a closure,
     // which TypeScript's control-flow analysis ignores (the bare variable
     // would narrow to null and refuse the optional call).
-    const watcherRef: { current: (() => void) | null } = { current: null }
+    // The settings-document listener the plugin subscribes to; the test fires
+    // it after flipping the live config reference.
+    const listenerRef: { current: ((ns: string) => void) | null } = { current: null }
     let enabled = false
+    const config = { agentTerminalTools: { get: () => enabled } }
     const settings = {
-      register() {
-        return {
-          get: () => ({ agentTerminalTools: enabled }),
-          watch: (callback: () => void) => { watcherRef.current = callback; return () => {} },
-          update: async () => {},
-          replace: async () => {},
-        }
-      },
+      configure: () => () => {},
       describe: () => [],
       async update() {},
     }
@@ -1176,28 +1174,32 @@ describe('agent terminal tool gating', () => {
         if (deps.includes('settings')) callback({ settings })
         return () => {}
       },
-      // The session/agent event feeds: nothing emits in these tests.
-      on: () => () => {},
+      // The session/agent event feeds: nothing emits in these tests; the
+      // settings-document feed captures the plugin's watch listener.
+      on: (event: string, listener: (ns: string) => void) => {
+        if (event === 'settings/document-updated') listenerRef.current = listener
+        return () => {}
+      },
       // No jobs/agents services: the jobs routes degrade to a 503.
       get: () => undefined,
     }
-    apply(ctx as never)
+    apply(ctx as never, config as never)
     // Default off: no tools are registered even though the settings service is mounted.
     expect(live()).toBe(0)
     // Flipping the setting on registers all eight tools.
     enabled = true
-    watcherRef.current?.()
+    listenerRef.current?.(SIDEBAR_PREFS_NS)
     expect(live()).toBe(8)
     expect(disposed).toBe(0)
     // Flipping it back off unregisters them (and releases any agent terminals).
     enabled = false
-    watcherRef.current?.()
+    listenerRef.current?.(SIDEBAR_PREFS_NS)
     expect(live()).toBe(0)
     expect(disposed).toBe(8)
     // And a redundant toggle registers them fresh (no double-registration per
     // flip: the guard only skips when the tools are already live).
     enabled = true
-    watcherRef.current?.()
+    listenerRef.current?.(SIDEBAR_PREFS_NS)
     expect(live()).toBe(8)
     expect(registered).toBe(16)
   })
@@ -1208,17 +1210,13 @@ describe('agent sidebar-open tool gating', () => {
     let registered = 0
     let disposed = 0
     const live = (): number => registered - disposed
-    const watcherRef: { current: (() => void) | null } = { current: null }
+    // The settings-document listener the plugin subscribes to; the test fires
+    // it after flipping the live config reference.
+    const listenerRef: { current: ((ns: string) => void) | null } = { current: null }
     let enabled = false
+    const config = { agentOpenTools: { get: () => enabled } }
     const settings = {
-      register() {
-        return {
-          get: () => ({ agentOpenTools: enabled, tabsEnabled: {} }),
-          watch: (callback: () => void) => { watcherRef.current = callback; return () => {} },
-          update: async () => {},
-          replace: async () => {},
-        }
-      },
+      configure: () => () => {},
       describe: () => [],
       async update() {},
     }
@@ -1235,26 +1233,30 @@ describe('agent sidebar-open tool gating', () => {
         if (deps.includes('settings')) callback({ settings })
         return () => {}
       },
-      // The session/agent event feeds: nothing emits in these tests.
-      on: () => () => {},
+      // The session/agent event feeds: nothing emits in these tests; the
+      // settings-document feed captures the plugin's watch listener.
+      on: (event: string, listener: (ns: string) => void) => {
+        if (event === 'settings/document-updated') listenerRef.current = listener
+        return () => {}
+      },
       get: () => undefined,
     }
-    apply(ctx as never)
+    apply(ctx as never, config as never)
     // Default off: no open tool is registered even though the settings service is mounted.
     expect(live()).toBe(0)
     // Flipping the setting on registers the single sidebar_open tool.
     enabled = true
-    watcherRef.current?.()
+    listenerRef.current?.(SIDEBAR_PREFS_NS)
     expect(live()).toBe(1)
     expect(disposed).toBe(0)
     // Flipping it back off unregisters it (and drains the undelivered queue).
     enabled = false
-    watcherRef.current?.()
+    listenerRef.current?.(SIDEBAR_PREFS_NS)
     expect(live()).toBe(0)
     expect(disposed).toBe(1)
     // And a redundant toggle registers it fresh (no double-registration).
     enabled = true
-    watcherRef.current?.()
+    listenerRef.current?.(SIDEBAR_PREFS_NS)
     expect(live()).toBe(1)
     expect(registered).toBe(2)
   })

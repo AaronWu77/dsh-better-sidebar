@@ -1,13 +1,13 @@
 /**
  * Unit tests for the Side Chat transcript mapping (src/client/sidechat-
  * transcript.ts): the seed cut at session/end-seed, context-injection rows
- * (plugin-stamped sources and the legacy boundary-prefix blob), chunk
+ * (non-user sources and the legacy boundary-prefix blob), chunk
  * streaming accumulation superseded by assembled messages, tool call/result
  * pairing, and orphan failed results.
  */
 import { describe, expect, it } from 'vitest'
 import type { SidebarHistoryEntry, SidebarSessionEvent } from '../src/context-types.ts'
-import { SIDE_BOUNDARY_PREFIX, SIDE_BOUNDARY_PROMPT, SIDE_INJECTION_PLUGIN } from '../src/sidechat-core.ts'
+import { SIDE_BOUNDARY_PREFIX, SIDE_BOUNDARY_PROMPT } from '../src/sidechat-core.ts'
 import {
   formatDurationMs,
   formatTokens,
@@ -40,7 +40,7 @@ describe('transcriptRows', () => {
     const entries = [
       entry(ev('user/message', 0, { content: textBlocks('inherited'), source: { kind: 'user' } })),
       entry(ev('session/end-seed', 1)),
-      entry(ev('user/message', 2, { content: textBlocks(`${SIDE_BOUNDARY_PREFIX}\n\nmode`), source: { kind: 'plugin', plugin: SIDE_INJECTION_PLUGIN } })),
+      entry(ev('user/message', 2, { content: textBlocks(`${SIDE_BOUNDARY_PREFIX}\n\nmode`), source: { kind: 'dsh-better-sidebar' } })),
       entry(ev('user/message', 3, { content: textBlocks('the side question'), source: { kind: 'user' } })),
     ]
     const rows = transcriptRows(entries)
@@ -67,10 +67,10 @@ describe('transcriptRows', () => {
     ])
   })
 
-  it('renders any plugin-sourced context message as an injection row, boundary prefix or not', () => {
+  it('renders any non-user context message as an injection row, boundary prefix or not', () => {
     const entries = [
       entry(ev('session/end-seed', 0)),
-      entry(ev('user/message', 1, { content: textBlocks('runtime context'), source: { kind: 'plugin', plugin: 'other-plugin' } })),
+      entry(ev('user/message', 1, { content: textBlocks('runtime context'), source: { kind: 'other-plugin' } })),
       entry(ev('user/message', 2, { content: textBlocks('q'), source: { kind: 'user' } })),
     ]
     const rows = transcriptRows(entries)
@@ -124,7 +124,8 @@ describe('transcriptRows', () => {
         step: 1,
         message: {
           source: { kind: 'tool', callId: 'c1' },
-          content: [{ type: 'tool-result', toolCallId: 'c1', isError: true, content: [{ type: 'text', text: 'denied' }] }],
+          content: [{ type: 'text', text: 'denied' }],
+          isError: true,
         },
         error: { name: 'EACCES', code: 'EACCES' },
       })),
@@ -160,7 +161,8 @@ describe('transcriptRows', () => {
         step: 1,
         message: {
           source: { kind: 'tool', callId: 'gone' },
-          content: [{ type: 'tool-result', toolCallId: 'gone', isError: true, content: [{ type: 'text', text: 'boom' }] }],
+          content: [{ type: 'text', text: 'boom' }],
+          isError: true,
         },
         error: { name: 'X', code: 'X' },
       })),
@@ -218,7 +220,7 @@ describe('tool cards', () => {
       step: 1,
       message: {
         source: { kind: 'tool', callId },
-        content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text }] }],
+        content: [{ type: 'text', text }],
       },
       ...extra,
     }))
@@ -409,7 +411,7 @@ describe('transcriptRows row reuse (the poll-to-poll identity pass)', () => {
     const before = transcriptRows([entry(ev('session/end-seed', 0)), call])
     expect(before[0]).toMatchObject({ kind: 'tool', executing: true })
     const result = entry(ev('tool/result', 2, {
-      message: { source: { callId: 'c1' }, content: [{ type: 'tool-result', content: [{ type: 'text', text: 'out' }] }] },
+      message: { source: { callId: 'c1' }, content: [{ type: 'text', text: 'out' }] },
     }))
     const after = transcriptRows([entry(ev('session/end-seed', 0)), call, result], before)
     expect(after[0]).not.toBe(before[0])
@@ -436,7 +438,7 @@ describe('transcriptRows row reuse (newer row kinds)', () => {
     const before = transcriptRows([entry(ev('session/end-seed', 0)), call])
     expect(before[0]).toMatchObject({ kind: 'tool', executing: true })
     const result = entry(ev('tool/result', 2, {
-      message: { source: { callId: 'c1' }, content: [{ type: 'tool-result', content: [{ type: 'text', text: 'out\n[exit 0]' }] }] },
+      message: { source: { callId: 'c1' }, content: [{ type: 'text', text: 'out\n[exit 0]' }] },
     }))
     const after = transcriptRows([entry(ev('session/end-seed', 0)), call, result], before)
     expect(after[0]).not.toBe(before[0])

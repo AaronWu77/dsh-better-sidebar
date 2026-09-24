@@ -140,8 +140,7 @@ export function toolArgsSummary(args: string | undefined): string {
   return flatTruncate(args)
 }
 
-/** The plain text of a tool/result message (text blocks inside its
- *  `tool-result` content block). */
+/** The plain text of a tool/result message (its text content blocks). */
 function resultTextOf(data: Record<string, unknown>): string {
   const message = data.message as { content?: unknown } | undefined
   const content = message?.content
@@ -149,16 +148,9 @@ function resultTextOf(data: Record<string, unknown>): string {
   const parts: string[] = []
   for (const block of content) {
     if (block === null || typeof block !== 'object') continue
-    const candidate = block as { type?: unknown; content?: unknown }
-    if (candidate.type !== 'tool-result') continue
-    const inner = candidate.content
-    if (!Array.isArray(inner)) continue
-    for (const item of inner) {
-      if (item === null || typeof item !== 'object') continue
-      const textItem = item as { type?: unknown; text?: unknown }
-      if (textItem.type === 'text' && typeof textItem.text === 'string') {
-        parts.push(textItem.text)
-      }
+    const candidate = block as { type?: unknown; text?: unknown }
+    if (candidate.type === 'text' && typeof candidate.text === 'string') {
+      parts.push(candidate.text)
     }
   }
   return parts.join('\n')

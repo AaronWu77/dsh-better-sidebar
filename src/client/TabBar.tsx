@@ -10,7 +10,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import clsx from 'clsx'
 import {
-  IconCloseFill14, IconPlusOutline16, Menu,
+  IconCloseFillRegular, IconPlusOutlineRegular, Menu,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SidebarTab } from './state.ts'
 import { isAgentTabId } from './state.ts'
@@ -241,7 +241,7 @@ export function TabBar(props: {
                 onClose(tab.id)
               }}
             >
-              <IconCloseFill14 />
+              <IconCloseFillRegular size={14} />
             </button>
           </div>
           )
@@ -275,7 +275,7 @@ export function TabBar(props: {
               title={t('newTab')}
               onClick={() => { setMenuOpen(v => !v); setTabMenu(null) }}
             >
-              <IconPlusOutline16 />
+              <IconPlusOutlineRegular size={16} />
             </button>
           )}
         />

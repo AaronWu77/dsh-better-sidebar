@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Markdown frontmatter preview regression (#251): a leading, closed YAML
  * metadata block must not reach the shared MarkdownText parser, where its

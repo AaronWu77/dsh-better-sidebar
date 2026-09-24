@@ -48,7 +48,7 @@ const EVENTS = [
       step: 1,
       message: {
         source: { kind: 'tool', callId: 'c1' },
-        content: [{ type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: 'sidechat-ok-42\n[exit code: 0]' }] }],
+        content: [{ type: 'text', text: 'sidechat-ok-42\n[exit code: 0]' }],
       },
     },
   },

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Built-in registration tests: the plugin registers 7 tabs and 6 file
  * viewers through the same service external plugins use (dogfooding);
