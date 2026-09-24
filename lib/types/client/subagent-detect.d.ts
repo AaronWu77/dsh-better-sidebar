@@ -8,7 +8,9 @@
  *   subagent just spawned under the current session" (the auto-open trigger),
  * - {@link countSubagentDescendants}: uninterrupted subagent-origin lineage
  *   totals (mirror of the official `indexSubagentDescendants` over the
- *   plugin's own summary rows).
+ *   plugin's own summary rows),
+ * - {@link deriveCatalogs}: the per-parent topology catalogs built from the
+ *   DSH 0.1.7 session projection map.
  *
  * The lineage walks themselves ({@link isSideThreadSummary}, {@link
  * rootAncestor}, {@link countSubagentDescendants}) live in
@@ -21,6 +23,19 @@ export { countSubagentDescendants, isSideThreadSummary, rootAncestor };
 export type { SubagentDescendantTotals } from './subagent-lineage.ts';
 /** Count the direct subagent children of one session (durable `origin` rows). */
 export declare function directSubagentCount(byId: SidebarSessionList['byId'], sessionId: string): number;
+/**
+ * Derive the per-parent subagent catalogs from the DSH 0.1.7 session
+ * projection map (the direct `subagentsByParent` list field is gone).
+ *
+ * A projection entry whose `subagentCatalog` has not settled yet still yields
+ * a ready empty catalog; the caller's summary-backed loading placeholder
+ * covers that transient window. DSH's `'unknown'` mode means "visible but not
+ * continuable", which the plugin's two-arm entry union renders as
+ * `'one-shot'`.
+ * @param list - the client sessions list snapshot.
+ * @returns one catalog per session that has a projection entry.
+ */
+export declare function deriveCatalogs(list: SidebarSessionList): Record<string, SidebarSubagentCatalog>;
 /**
  * Collect every catalog branch (an entry with `hasChildren`) reachable from
  * the root — the set of catalogs the always-expanded topology consumes.

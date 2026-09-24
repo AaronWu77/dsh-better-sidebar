@@ -8,7 +8,9 @@
  *   subagent just spawned under the current session" (the auto-open trigger),
  * - {@link countSubagentDescendants}: uninterrupted subagent-origin lineage
  *   totals (mirror of the official `indexSubagentDescendants` over the
- *   plugin's own summary rows).
+ *   plugin's own summary rows),
+ * - {@link deriveCatalogs}: the per-parent topology catalogs built from the
+ *   DSH 0.1.7 session projection map.
  *
  * The lineage walks themselves ({@link isSideThreadSummary}, {@link
  * rootAncestor}, {@link countSubagentDescendants}) live in
@@ -18,6 +20,7 @@
 import type {
   SidebarSessionList,
   SidebarSubagentCatalog,
+  SidebarSubagentChildEntry,
 } from '../context-types.ts'
 import { countSubagentDescendants, isSideThreadSummary, rootAncestor } from './subagent-lineage.ts'
 
@@ -35,6 +38,38 @@ export function directSubagentCount(
       && !isSideThreadSummary(summary)) count += 1
   }
   return count
+}
+
+/**
+ * Derive the per-parent subagent catalogs from the DSH 0.1.7 session
+ * projection map (the direct `subagentsByParent` list field is gone).
+ *
+ * A projection entry whose `subagentCatalog` has not settled yet still yields
+ * a ready empty catalog; the caller's summary-backed loading placeholder
+ * covers that transient window. DSH's `'unknown'` mode means "visible but not
+ * continuable", which the plugin's two-arm entry union renders as
+ * `'one-shot'`.
+ * @param list - the client sessions list snapshot.
+ * @returns one catalog per session that has a projection entry.
+ */
+export function deriveCatalogs(list: SidebarSessionList): Record<string, SidebarSubagentCatalog> {
+  const catalogs: Record<string, SidebarSubagentCatalog> = {}
+  const projections = list.projectionsBySession ?? {}
+  for (const [parentSessionId, projection] of Object.entries(projections)) {
+    catalogs[parentSessionId] = {
+      state: 'ready',
+      error: null,
+      entries: (projection.values.subagentCatalog ?? []).map((entry): SidebarSubagentChildEntry => ({
+        kind: 'child',
+        id: entry.id,
+        activity: list.byId[entry.id]?.running === true ? 'running' : 'inactive',
+        hasChildren: (projections[entry.id]?.values.subagentCatalog?.length ?? 0) > 0,
+        mode: entry.mode === 'unknown' ? 'one-shot' : entry.mode,
+        ...(entry.label === undefined ? {} : { label: entry.label }),
+      })),
+    }
+  }
+  return catalogs
 }
 
 /**

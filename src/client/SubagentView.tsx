@@ -34,10 +34,12 @@ import type {
   SidebarSubagentChildEntry,
   SidebarSubagentDiagnosticEntry,
   SidebarJobView,
+  SidebarJobsSnapshot,
 } from '../context-types.ts'
 import {
   collectBranchIds,
   countSubagentDescendants,
+  deriveCatalogs,
   isSideThreadSummary,
   rootAncestor,
 } from './subagent-detect.ts'
@@ -47,9 +49,11 @@ import {
   collectTreeJobs,
   formatJobDuration,
   isJobLive,
+  mapJobViewRows,
   orderJobs,
   jobDotState,
   jobStatusLabel,
+  treeSessionIds,
   type TreeJob,
 } from './subagent-jobs.ts'
 import { api, type JobOutputResult } from './api.ts'
@@ -66,6 +70,8 @@ const ARGS_PREVIEW = 60
 const JOB_POLL_MS = 2000
 /** How long the kill button stays armed before it needs re-confirming. */
 const JOB_KILL_ARM_MS = 3000
+/** Stable snapshot for a deployment without the client `jobs` service. */
+const EMPTY_JOBS_SNAPSHOT: SidebarJobsSnapshot = { rows: {} }
 
 /** The direct subagent children of one parent (durable `origin` rows;
  *  Side Chat threads ride the same origin but are tab-strip conversations,
@@ -450,23 +456,23 @@ function JobOutputPane(props: {
 
 /**
  * The background-job section of the Subagent page: every job of the whole
- * current tree (main agent + subagents, owner-labeled), fed by the harness
- * `session/jobs` push mirror. Clicking a row feeds its model-read output to
- * the shared bottom dock (event replay — never the model's cursor); live
- * rows carry a two-click-confirm kill button. Renders nothing while the
- * tree has no jobs.
+ * current tree (main agent + subagents, owner-labeled), fed by the client
+ * `jobs` service's rosters (or the legacy list mirror on older deployments).
+ * Clicking a row feeds its model-read output to the shared bottom dock
+ * (event replay — never the model's cursor); live rows carry a two-click-
+ * confirm kill button. Renders nothing while the tree has no jobs.
  */
 function JobsSection(props: {
   byId: SidebarSessionList['byId']
-  jobsBySession: SidebarSessionList['jobsBySession']
+  jobRows: Readonly<Record<string, readonly SidebarJobView[]>> | undefined
   rootId: string | undefined
   /** The page is visible (active tab + open panel): skip polling otherwise. */
   active: boolean
 }) {
-  const { byId, jobsBySession, rootId, active } = props
+  const { byId, jobRows, rootId, active } = props
   const rows = useMemo(
-    () => orderJobs(collectTreeJobs(byId, jobsBySession, rootId)),
-    [byId, jobsBySession, rootId],
+    () => orderJobs(collectTreeJobs(byId, jobRows, rootId)),
+    [byId, jobRows, rootId],
   )
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined)
   const [armedId, setArmedId] = useState<string | undefined>(undefined)
@@ -633,16 +639,33 @@ export function SubagentView(props: {
   const sessions = ctx.sessions
 
   // The same list feed the official catalog consumes (byId lineage + the
-  // lazy per-parent catalogs). Older DSH snapshots without the subagent seam
-  // simply leave these surfaces empty — the page degrades to the empty state.
+  // per-session projection map). Older DSH snapshots without the projection
+  // map simply leave these surfaces empty — the page degrades to the empty
+  // state.
   const list = useSyncExternalStore(
     useMemo(() => (callback: () => void) => sessions.list.subscribe(callback), [sessions]),
     useCallback(() => sessions.list.getSnapshot(), [sessions]),
   )
   const byId = list.byId
-  // Memoized so the empty-catalog fallback keeps a stable identity — a fresh
-  // `{}` per render would invalidate every catalog-dependent memo/effect.
-  const catalogs = useMemo(() => list.subagentsByParent ?? {}, [list.subagentsByParent])
+  // The 0.1.7 catalogs are derived from the per-session projection map (the
+  // old direct `subagentsByParent` feed is gone); memoized so a catalog
+  // rebuilds only when its sources move.
+  const catalogs = useMemo(() => deriveCatalogs(list), [list])
+
+  // The DSH 0.1.7+ client jobs service; older deployments have no service and
+  // fall back to the legacy `jobsBySession` list mirror (or no rows at all).
+  const jobsService = ctx.get('jobs')
+  const jobsSnapshot = useSyncExternalStore(
+    useMemo(
+      () => (callback: () => void) => jobsService?.state.subscribe(callback) ?? (() => {}),
+      [jobsService],
+    ),
+    useCallback(() => jobsService?.state.getSnapshot() ?? EMPTY_JOBS_SNAPSHOT, [jobsService]),
+  )
+  const jobRows = useMemo(
+    () => jobsService === undefined ? list.jobsBySession : mapJobViewRows(jobsSnapshot.rows),
+    [jobsService, jobsSnapshot, list.jobsBySession],
+  )
 
   // The topology root: the main agent of the current session's tree.
   const rootId = useMemo(() => rootAncestor(byId, sessionId), [byId, sessionId])
@@ -650,8 +673,19 @@ export function SubagentView(props: {
   const rootSummary = rootId === undefined ? undefined : byId[rootId]
   const live = useSubagentLive(rootId, active)
 
+  // Every session of the visible tree has its job roster watched while the
+  // page is active (the service drops a roster when its last watcher stops).
+  const treeIds = useMemo(() => [...treeSessionIds(byId, rootId)], [byId, rootId])
+  useEffect(() => {
+    if (!active || jobsService === undefined) return
+    const stops = treeIds.map(id => jobsService.watchRows(id))
+    return () => { for (const stop of stops) stop() }
+  }, [active, jobsService, treeIds])
+
   /** Catalog owners currently consuming live membership updates. */
   const observedRef = useRef(new Set<string>())
+  /** Catalog owners whose projection load this page already requested. */
+  const requestedRef = useRef(new Set<string>())
 
   const observe = useCallback((parentSessionId: string, open: boolean): void => {
     sessions.setSubagentCatalogOpen?.(parentSessionId, open)
@@ -659,12 +693,25 @@ export function SubagentView(props: {
     else observedRef.current.delete(parentSessionId)
   }, [sessions])
 
+  const refresh = useCallback((parentSessionId: string): void => {
+    void sessions.refreshProjections?.(parentSessionId)
+  }, [sessions])
+
+  // The automatic load runs once per parent: an errored projection waits for
+  // the user's explicit refresh instead of retrying on every snapshot change.
+  const ensureLoaded = useCallback((parentSessionId: string): void => {
+    if (requestedRef.current.has(parentSessionId)) return
+    requestedRef.current.add(parentSessionId)
+    refresh(parentSessionId)
+  }, [refresh])
+
   // While the page is visible the topology root consumes live membership; a
   // root change (switching to another main agent's tree) or the page hiding
   // (tab switched away / panel collapsed) releases everything observed.
   useEffect(() => {
     if (rootId === undefined || !active) return
     observe(rootId, true)
+    ensureLoaded(rootId)
     return () => {
       // The cleanup must release everything observed AT cleanup time (the set
       // mutates as branches open), so reading the ref here is the point.
@@ -674,7 +721,7 @@ export function SubagentView(props: {
       }
       observedRef.current.clear()
     }
-  }, [rootId, active, observe, sessions])
+  }, [rootId, active, observe, ensureLoaded, sessions])
 
   // Every branch of the always-expanded topology consumes live membership
   // (add-only: a branch stays observed until the root changes or the page
@@ -684,8 +731,9 @@ export function SubagentView(props: {
     if (!active) return
     for (const id of branches) {
       if (!observedRef.current.has(id)) observe(id, true)
+      ensureLoaded(id)
     }
-  }, [branches, active, observe])
+  }, [branches, active, observe, ensureLoaded])
 
   // Unobserve everything on unmount (the host stops refreshing unused catalogs).
   useEffect(() => () => {
@@ -717,10 +765,6 @@ export function SubagentView(props: {
       console.error('[dsh-better-sidebar] open session failed:', error)
     }
   }, [sessions, rootId])
-
-  const refresh = useCallback((parentSessionId: string): void => {
-    void sessions.refreshSubagents?.(parentSessionId)
-  }, [sessions])
 
   const totals = useMemo(
     () => rootId === undefined
@@ -862,7 +906,7 @@ export function SubagentView(props: {
         </div>
         <JobsSection
           byId={byId}
-          jobsBySession={list.jobsBySession}
+          jobRows={jobRows}
           rootId={rootId}
           active={active}
         />

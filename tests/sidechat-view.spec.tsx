@@ -147,7 +147,6 @@ function threadStore(): ReturnType<typeof makeStore> {
       root: { id: 'root', displayTitle: '主会话', running: false },
       t1: { id: 't1', displayTitle: 'Side: 线程一', origin: 'subagent', parentId: 'root', running: false },
     },
-    subagentsByParent: {},
     jobsBySession: {},
   })
 }

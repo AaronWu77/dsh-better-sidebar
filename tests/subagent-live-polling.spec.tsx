@@ -35,12 +35,13 @@ type Store = ReturnType<typeof makeStore>
  *  regression assertion (the new page must never call it). */
 function makeCtx(store: Store, historySpy: ReturnType<typeof vi.fn>): Context {
   return {
+    get: () => undefined,
     sessions: {
       list: store,
       setSubagentCatalogOpen: () => {},
       openSubagent: () => {},
       open: () => {},
-      refreshSubagents: async () => {},
+      refreshProjections: async () => {},
     },
     connection: {
       api: {
@@ -64,15 +65,14 @@ function runningSnapshot(): SidebarSessionList {
       a: { id: 'a', displayTitle: 'A', origin: 'subagent', parentId: 'root', running: true },
       b: { id: 'b', displayTitle: 'B', origin: 'subagent', parentId: 'root', running: true },
     },
-    subagentsByParent: {
+    projectionsBySession: {
       root: {
-        entries: [
-          { kind: 'child', id: 'a', activity: 'running', hasChildren: false, mode: 'one-shot', label: 'A' },
-          { kind: 'child', id: 'b', activity: 'running', hasChildren: false, mode: 'one-shot', label: 'B' },
-        ],
-        parentAvailable: true,
-        state: 'ready',
-        error: null,
+        values: {
+          subagentCatalog: [
+            { id: 'a', createdAt: 1, mode: 'one-shot', label: 'A' },
+            { id: 'b', createdAt: 2, mode: 'one-shot', label: 'B' },
+          ],
+        },
       },
     },
     jobsBySession: {},
@@ -89,23 +89,21 @@ function reRootedSnapshot(): SidebarSessionList {
       a: { id: 'a', displayTitle: 'A', origin: 'subagent', parentId: 'root', running: true },
       b: { id: 'b', displayTitle: 'B', origin: 'subagent', parentId: 'root', running: true },
     },
-    subagentsByParent: {
+    projectionsBySession: {
       grand: {
-        entries: [
-          { kind: 'child', id: 'root', activity: 'running', hasChildren: true, mode: 'continuable', label: 'R' },
-        ],
-        parentAvailable: true,
-        state: 'ready',
-        error: null,
+        values: {
+          subagentCatalog: [
+            { id: 'root', createdAt: 1, mode: 'continuable', label: 'R' },
+          ],
+        },
       },
       root: {
-        entries: [
-          { kind: 'child', id: 'a', activity: 'running', hasChildren: false, mode: 'one-shot', label: 'A' },
-          { kind: 'child', id: 'b', activity: 'running', hasChildren: false, mode: 'one-shot', label: 'B' },
-        ],
-        parentAvailable: true,
-        state: 'ready',
-        error: null,
+        values: {
+          subagentCatalog: [
+            { id: 'a', createdAt: 1, mode: 'one-shot', label: 'A' },
+            { id: 'b', createdAt: 2, mode: 'one-shot', label: 'B' },
+          ],
+        },
       },
     },
     jobsBySession: {},

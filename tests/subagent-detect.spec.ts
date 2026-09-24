@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  collectBranchIds, countSubagentDescendants, detectNewDirectSubagent,
+  collectBranchIds, countSubagentDescendants, deriveCatalogs, detectNewDirectSubagent,
   directSubagentCount, rootAncestor,
 } from '../src/client/subagent-detect.ts'
 import type { SidebarSessionList, SidebarSubagentCatalog } from '../src/context-types.ts'
@@ -147,16 +147,67 @@ describe('subagent detection over the sessions list feed', () => {
       kind: 'child', id, activity: 'inactive', hasChildren, mode: 'one-shot',
     })
     const catalogs: Record<string, SidebarSubagentCatalog> = {
-      root: { entries: [child('a', true), child('b', false)], parentAvailable: true, state: 'ready', error: null },
-      a: { entries: [child('c', false)], parentAvailable: true, state: 'ready', error: null },
+      root: { entries: [child('a', true), child('b', false)], state: 'ready', error: null },
+      a: { entries: [child('c', false)], state: 'ready', error: null },
     }
     expect(collectBranchIds(catalogs, 'root')).toEqual(['a'])
     expect(collectBranchIds(catalogs, undefined)).toEqual([])
     // A cycle terminates (each branch id collected at most once, no hang).
     const cyclic: Record<string, SidebarSubagentCatalog> = {
-      root: { entries: [child('a', true)], parentAvailable: true, state: 'ready', error: null },
-      a: { entries: [child('root', true)], parentAvailable: true, state: 'ready', error: null },
+      root: { entries: [child('a', true)], state: 'ready', error: null },
+      a: { entries: [child('root', true)], state: 'ready', error: null },
     }
     expect(collectBranchIds(cyclic, 'root')).toEqual(['a', 'root'])
+  })
+})
+
+describe('deriveCatalogs over the 0.1.7 session projection map', () => {
+  it('maps catalog entries with summary activity, nested-child flags, and unknown mode', () => {
+    const list: SidebarSessionList = {
+      current: 'root',
+      byId: {
+        root: { id: 'root', displayTitle: 'Root' },
+        running: { id: 'running', displayTitle: 'Running', origin: 'subagent', parentId: 'root', running: true },
+        idle: { id: 'idle', displayTitle: 'Idle', origin: 'subagent', parentId: 'root' },
+        grand: { id: 'grand', displayTitle: 'Grand', origin: 'subagent', parentId: 'running' },
+      },
+      projectionsBySession: {
+        root: {
+          values: {
+            subagentCatalog: [
+              { id: 'running', createdAt: 1, mode: 'continuable', label: 'Worker' },
+              { id: 'idle', createdAt: 2, mode: 'unknown' },
+            ],
+          },
+        },
+        running: {
+          values: { subagentCatalog: [{ id: 'grand', createdAt: 3, mode: 'one-shot' }] },
+        },
+        // A projection entry whose catalog has not settled yet is still a
+        // ready empty catalog (the caller's summary-backed placeholder covers
+        // that transient window).
+        pending: { values: {} },
+      },
+    }
+    const catalogs = deriveCatalogs(list)
+    expect(catalogs['root']).toEqual({
+      state: 'ready',
+      error: null,
+      entries: [
+        { kind: 'child', id: 'running', activity: 'running', hasChildren: true, mode: 'continuable', label: 'Worker' },
+        // DSH's 'unknown' mode is visible-but-not-continuable; the plugin's
+        // two-arm entry union renders it as one-shot.
+        { kind: 'child', id: 'idle', activity: 'inactive', hasChildren: false, mode: 'one-shot' },
+      ],
+    })
+    expect(catalogs['pending']).toEqual({ state: 'ready', error: null, entries: [] })
+  })
+
+  it('has no catalog at all for a parent without a projection entry', () => {
+    const list: SidebarSessionList = {
+      current: 'root',
+      byId: { root: { id: 'root', displayTitle: 'Root' } },
+    }
+    expect(deriveCatalogs(list)).toEqual({})
   })
 })

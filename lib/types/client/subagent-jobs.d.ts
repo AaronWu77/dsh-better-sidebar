@@ -1,12 +1,13 @@
 /**
  * Pure derivations for the Subagent page's background-job section. Kept
  * framework-free so the node test environment can unit-test them: the job
- * rows arrive through the harness `session/jobs` push mirror
- * (`jobsBySession` in the sessions list feed) — nothing here issues
+ * rows arrive from the DSH 0.1.7 client `jobs` service (mapped by
+ * {@link mapJobViewRows}) or, as a graceful fallback for older deployments,
+ * from the legacy `jobsBySession` list mirror — nothing here issues
  * requests, and the row ordering / status mapping mirror the official
  * ui-jobs header list.
  */
-import type { SidebarSessionList, SidebarJobStatus, SidebarJobView } from '../context-types.ts';
+import type { SidebarClientJobView, SidebarSessionList, SidebarJobStatus, SidebarJobView } from '../context-types.ts';
 import type { CopyKey } from './locales.ts';
 import { treeSessionIds } from './subagent-lineage.ts';
 /** One row of the jobs section: the job plus its owning session's title. */
@@ -17,6 +18,20 @@ export interface TreeJob {
 }
 /** Whether the registry still holds the job open (its duration ticks). */
 export declare function isJobLive(job: SidebarJobView): boolean;
+/**
+ * Narrow one client jobs-service roster row into the sidebar's
+ * {@link SidebarJobView} mirror; producer-only fields (owner, progress,
+ * output coordinates) are dropped.
+ * @param job - one row of the `ctx.jobs` roster snapshot.
+ * @returns the sidebar's job row.
+ */
+export declare function toSidebarJobView(job: SidebarClientJobView): SidebarJobView;
+/**
+ * Map the client jobs service's per-session rosters into the sidebar shape.
+ * @param rows - the `ctx.jobs` snapshot's `rows` map.
+ * @returns the same session keys with each roster narrowed for presentation.
+ */
+export declare function mapJobViewRows(rows: Readonly<Record<string, readonly SidebarClientJobView[]>>): Record<string, readonly SidebarJobView[]>;
 export { treeSessionIds };
 /**
  * Whether a NEW background job appeared for one session between two

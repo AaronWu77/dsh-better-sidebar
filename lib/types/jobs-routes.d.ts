@@ -1,8 +1,8 @@
 /**
  * Background-job routes of the /sidebar JSON API ('jobs.output' /
- * 'jobs.kill'). The job LIST needs no route: it arrives through the
- * harness's `session/jobs` push mirror (`jobsBySession` in the sessions
- * list feed). The routes:
+ * 'jobs.kill'). The job LIST needs no route: the browser reads it from the
+ * DSH 0.1.7+ client `jobs` service (legacy deployments keep the
+ * `jobsBySession` list mirror). The routes:
  *
  * - 'jobs.output' — REPLAYS the output the MODEL has read so far for one
  *   job. The source is the owner session's own event log: `tool/call` rows

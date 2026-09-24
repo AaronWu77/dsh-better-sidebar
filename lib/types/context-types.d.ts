@@ -150,10 +150,30 @@ export interface SidebarSubagentDiagnosticEntry {
     id: string;
     reason: 'corrupt' | 'unsupported' | 'unavailable';
 }
-/** The per-parent lazy catalog delivered through the sessions list feed. */
+/** One direct-child discovery row of the DSH 0.1.7 session projection map. */
+export type SidebarSubagentCatalogEntry = {
+    id: string;
+    createdAt: number;
+} & ({
+    mode: 'one-shot';
+    label?: string;
+} | {
+    mode: 'continuable';
+    label: string;
+} | {
+    mode: 'unknown';
+    label?: string;
+});
+/** One parent session's shared projection values as the client list snapshot exposes them. */
+export interface SidebarSessionProjection {
+    values: {
+        /** Direct-child discovery rows; absent until the projection read settles. */
+        subagentCatalog?: readonly SidebarSubagentCatalogEntry[];
+    };
+}
+/** The per-parent catalog the topology consumes (derived from the session projection map). */
 export interface SidebarSubagentCatalog {
     entries: Array<SidebarSubagentChildEntry | SidebarSubagentDiagnosticEntry>;
-    parentAvailable: boolean;
     state: 'loading' | 'ready' | 'error';
     error: {
         code?: string;
@@ -204,6 +224,41 @@ export interface SidebarJobView {
 export interface SidebarJobsService {
     /** Request cancellation; throws for an unknown or foreign job. */
     kill(id: string, caller?: SidebarAgent, reason?: string): 'requested' | 'already-finished';
+}
+/**
+ * One client jobs-roster row (structural subset of `@deepseek-ai/dsh-jobs/view`
+ * JobView: the fields the sidebar renders; owner/output/progress are dropped).
+ */
+export interface SidebarClientJobView {
+    id: string;
+    kind: string;
+    label: string;
+    status: SidebarJobStatus;
+    detail?: string;
+    startedAt: number;
+    finishedAt?: number;
+}
+/** The client jobs service's immutable roster snapshot (mirror of `JobsSnapshot`). */
+export interface SidebarJobsSnapshot {
+    /** Visible jobs per watched session; an unwatched or empty session has no key. */
+    readonly rows: Readonly<Record<string, readonly SidebarClientJobView[]>>;
+}
+/**
+ * The client `jobs` service face (DSH 0.1.7+, mirror of the job-controller
+ * client service). Only the slices this plugin consumes are restated: the
+ * roster snapshot plus per-session watch registration.
+ */
+export interface SidebarClientJobsService {
+    readonly state: {
+        getSnapshot(): SidebarJobsSnapshot;
+        subscribe(listener: () => void): () => void;
+    };
+    /**
+     * Keep one session's roster current; reference-counted.
+     * @param sessionId - the session whose visible jobs to mirror.
+     * @returns stop function releasing this watcher's reference.
+     */
+    watchRows(sessionId: string): () => void;
 }
 /** The host agent registry face (structural mirror of the runtime `ctx.agents`). */
 export interface SidebarAgentsService {
@@ -313,12 +368,16 @@ export interface SidebarSessionHandle {
 export interface SidebarSessionList {
     current: string | undefined;
     byId: Record<string, SidebarSessionSummary>;
-    /** Direct durable catalogs keyed by their selected parent address. */
-    subagentsByParent?: Readonly<Record<string, SidebarSubagentCatalog>>;
     /**
-     * Background jobs per session, last-wins from the harness's `session/jobs`
-     * push (a missing key is an empty set). Absent on runtime snapshots older
-     * than the jobs mirror — the sidebar simply shows no job rows.
+     * Shared projection values keyed by session id (DSH 0.1.7 replaced the
+     * direct `subagentsByParent` catalog with this per-session map); absent on
+     * runtime snapshots that predate the projection map.
+     */
+    projectionsBySession?: Readonly<Record<string, SidebarSessionProjection>>;
+    /**
+     * Legacy background-jobs mirror (pre-0.1.7): jobs per session, last-wins
+     * from the harness's `session/jobs` push. Kept as the graceful fallback for
+     * deployments without the client `jobs` service.
      */
     jobsBySession?: Readonly<Record<string, readonly SidebarJobView[]>>;
 }
@@ -374,9 +433,10 @@ export interface SidebarSessionsService {
      */
     setSubagentCatalogOpen?(parentSessionId: string, open: boolean): void;
     /**
-     * Refresh one direct-child catalog.
+     * Load one session's projection baseline (DSH 0.1.7); the direct-child
+     * catalog arrives through the list snapshot's `projectionsBySession`.
      */
-    refreshSubagents?(parentSessionId: string): Promise<void>;
+    refreshProjections?(parentSessionId: string): Promise<void>;
 }
 /**
  * The client locale service face (mirror of @deepseek-ai/dsh-client-locale's
@@ -499,8 +559,13 @@ export interface SidebarContextShape {
     modules: {
         import(specifier: string): Promise<unknown>;
     };
-    /** The host background-job registry (optional; routes degrade to 503). */
-    jobs: SidebarJobsService;
+    /**
+     * The background-job face. Host loads provide the registry verbs
+     * (`kill`); the DSH 0.1.7+ client provides the roster service
+     * (`state`/`watchRows`). The halves are intersected the same way as
+     * `sessions`, so each call site resolves against the member it needs.
+     */
+    jobs: SidebarJobsService & SidebarClientJobsService;
     /** The host live-agent registry (optional; side chat thread agents). */
     agents: SidebarAgentsService;
     /** The host subagent runtime (optional; live topology batch route). */

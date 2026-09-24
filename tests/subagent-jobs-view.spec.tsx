@@ -1,9 +1,10 @@
 /**
  * Subagent page tests for the background-job section: rows render from the
- * `jobsBySession` mirror, clicking a row peeks its output through
- * `jobs.output` with the OWNER session scope, the kill button needs a
- * two-click confirm, settled rows offer no kill, and the output panel never
- * polls while the page is hidden.
+ * DSH 0.1.7 client `jobs` service (with the legacy `jobsBySession` mirror as
+ * the fallback), clicking a row peeks its output through `jobs.output` with
+ * the OWNER session scope, the kill button needs a two-click confirm, settled
+ * rows offer no kill, and the output panel never polls while the page is
+ * hidden.
  */
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -11,7 +12,13 @@ import { createElement } from 'react'
 import { act } from 'react-dom/test-utils'
 import { renderRoot } from './test-utils.ts'
 import { SubagentView } from '../src/client/SubagentView.tsx'
-import type { Context, SidebarSessionList } from '../src/context-types.ts'
+import type {
+  Context,
+  SidebarClientJobView,
+  SidebarClientJobsService,
+  SidebarJobsSnapshot,
+  SidebarSessionList,
+} from '../src/context-types.ts'
 
 /** A subscribable sessions-list snapshot (mirror of the runtime list feed). */
 function makeStore(initial: SidebarSessionList) {
@@ -33,14 +40,15 @@ function makeStore(initial: SidebarSessionList) {
 type Store = ReturnType<typeof makeStore>
 
 /** The client context face SubagentView touches (history stub; everything else inert). */
-function makeCtx(store: Store): Context {
+function makeCtx(store: Store, jobs?: SidebarClientJobsService): Context {
   return {
+    get: (name: string) => (name === 'jobs' ? jobs : undefined),
     sessions: {
       list: store,
       setSubagentCatalogOpen: () => {},
       openSubagent: () => {},
       open: () => {},
-      refreshSubagents: async () => {},
+      refreshProjections: async () => {},
     },
     connection: {
       api: {
@@ -50,6 +58,33 @@ function makeCtx(store: Store): Context {
       },
     },
   } as unknown as Context
+}
+
+/** A client `jobs` service stand-in with one mutable roster snapshot. */
+function makeJobsService(initial: Record<string, SidebarClientJobView[]>) {
+  let snapshot: SidebarJobsSnapshot = { rows: initial }
+  const listeners = new Set<() => void>()
+  const watched: string[] = []
+  const stopped: string[] = []
+  const service: SidebarClientJobsService = {
+    state: {
+      getSnapshot: () => snapshot,
+      subscribe: (fn) => { listeners.add(fn); return () => { listeners.delete(fn) } },
+    },
+    watchRows: (sessionId) => {
+      watched.push(sessionId)
+      return () => { stopped.push(sessionId) }
+    },
+  }
+  return {
+    service,
+    watched,
+    stopped,
+    set(rows: Record<string, SidebarClientJobView[]>) {
+      snapshot = { rows }
+      for (const fn of [...listeners]) fn()
+    },
+  }
 }
 
 const outputCalls: Array<{ sessionId: string; id: string }> = []
@@ -66,7 +101,6 @@ function baseSnapshot(): SidebarSessionList {
       root: { id: 'root', displayTitle: '主会话', running: true },
       child: { id: 'child', displayTitle: '子代理', origin: 'subagent', parentId: 'root', running: true },
     },
-    subagentsByParent: {},
     jobsBySession: {
       root: [
         { id: 'bash-1', kind: 'bash', label: 'sleep 300', status: 'running', startedAt: 1_000 },
@@ -133,7 +167,7 @@ describe('SubagentView background jobs', () => {
   })
 
   it('renders nothing job-related when the mirror is empty', () => {
-    const store = makeStore({ current: 'root', byId: { root: { id: 'root', displayTitle: '主会话' } }, subagentsByParent: {}, jobsBySession: {} })
+    const store = makeStore({ current: 'root', byId: { root: { id: 'root', displayTitle: '主会话' } }, jobsBySession: {} })
     const { container, unmount } = renderRoot(
       createElement(SubagentView, { sessionId: 'root', active: true, ctx: makeCtx(store) }),
     )
@@ -233,7 +267,6 @@ describe('SubagentView background jobs', () => {
     const store = makeStore({
       current: 'root',
       byId: { root: { id: 'root', displayTitle: '主会话' } },
-      subagentsByParent: {},
       jobsBySession: { root: many },
     })
     const { container, unmount } = renderRoot(
@@ -281,5 +314,23 @@ describe('SubagentView background jobs', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('reads the 0.1.7 client jobs service over the legacy list mirror', () => {
+    const store = makeStore(baseSnapshot())
+    const jobs = makeJobsService({
+      root: [{ id: 'bash-9', kind: 'bash', label: 'from service', status: 'running', startedAt: 1_000 }],
+    })
+    const { container, unmount } = renderRoot(
+      createElement(SubagentView, { sessionId: 'root', active: true, ctx: makeCtx(store, jobs.service) }),
+    )
+    expect(container.textContent).toContain('from service')
+    // The service is authoritative: the legacy list mirror is ignored.
+    expect(container.textContent).not.toContain('sleep 300')
+    // Every session of the visible tree has its roster watched while active.
+    expect(jobs.watched).toEqual(['root', 'child'])
+    unmount()
+    // Unmounting releases every watcher.
+    expect(jobs.stopped).toEqual(['root', 'child'])
   })
 })

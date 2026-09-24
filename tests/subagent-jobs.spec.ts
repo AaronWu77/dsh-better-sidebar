@@ -8,9 +8,11 @@ import {
   detectNewJob,
   formatJobDuration,
   isJobLive,
+  mapJobViewRows,
   orderJobs,
   jobDotState,
   jobStatusLabel,
+  toSidebarJobView,
   treeSessionIds,
 } from '../src/client/subagent-jobs.ts'
 import type { SidebarSessionList, SidebarSessionSummary, SidebarJobStatus, SidebarJobView } from '../src/context-types.ts'
@@ -84,6 +86,41 @@ describe('collectTreeJobs', () => {
   })
 })
 
+describe('client jobs-service row mapping', () => {
+  it('narrows roster rows to the sidebar shape and drops producer-only fields', () => {
+    const roster = {
+      root: [{
+        id: 'bash-1',
+        kind: 'bash',
+        label: 'sleep 30',
+        status: 'running' as const,
+        startedAt: 1_000,
+        detail: 'exit code: 0',
+        finishedAt: 2_000,
+        owner: 'root',
+        progress: '3/10',
+        output: { total: 4, earliest: 0 },
+      }],
+    }
+    expect(mapJobViewRows(roster)).toEqual({
+      root: [{
+        id: 'bash-1',
+        kind: 'bash',
+        label: 'sleep 30',
+        status: 'running',
+        detail: 'exit code: 0',
+        startedAt: 1_000,
+        finishedAt: 2_000,
+      }],
+    })
+  })
+
+  it('omits absent optional fields instead of writing undefined', () => {
+    expect(toSidebarJobView({ id: 'bash-2', kind: 'pwsh', label: 'ls', status: 'completed', startedAt: 5 }))
+      .toEqual({ id: 'bash-2', kind: 'pwsh', label: 'ls', status: 'completed', startedAt: 5 })
+  })
+})
+
 describe('orderJobs', () => {
   it('puts live rows first in start order, then settled rows newest-first', () => {
     const row = (id: string, status: SidebarJobStatus, startedAt: number, finishedAt?: number) => ({
@@ -137,7 +174,6 @@ describe('detectNewJob', () => {
   const list = (jobsBySession: Record<string, SidebarJobView[]>): SidebarSessionList => ({
     current: 'root',
     byId: { root: { id: 'root', displayTitle: 'root' } },
-    subagentsByParent: {},
     jobsBySession: jobsBySession,
   })
 
