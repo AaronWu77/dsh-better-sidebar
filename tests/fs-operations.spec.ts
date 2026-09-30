@@ -103,7 +103,7 @@ describe('writeWorkspaceUpload', () => {
     }
   })
 
-  it('refuses upload directories and targets that resolve outside the workspace', async () => {
+  it.skipIf(process.platform === 'win32')('refuses upload directories and targets that resolve outside the workspace', async () => {
     const outside = mkdtempSync(join(tmpdir(), 'dsh-sidebar-upload-symlink-outside-'))
     const link = join(root, 'upload-link')
     try {
@@ -199,7 +199,7 @@ describe('renameWorkspaceEntry', () => {
       .rejects.toMatchObject({ code: 'fs-error' })
   })
 
-  it('renames a symlink ROW, not its target', async () => {
+  it.skipIf(process.platform === 'win32')('renames a symlink ROW, not its target', async () => {
     writeFileSync(join(root, 'target.txt'), 't')
     symlinkSync(join(root, 'target.txt'), join(root, 'alias.txt'))
     await renameWorkspaceEntry({ cwd: root, path: join(root, 'alias.txt'), name: 'alias2.txt' })
@@ -223,7 +223,7 @@ describe('removeWorkspaceEntry', () => {
     expect(existsSync(join(root, 'tree'))).toBe(false)
   })
 
-  it('unlinks a symlink row without touching (or recursing into) its target', async () => {
+  it.skipIf(process.platform === 'win32')('unlinks a symlink row without touching (or recursing into) its target', async () => {
     mkdirSync(join(root, 'realdir'), { recursive: true })
     writeFileSync(join(root, 'realdir/keep.txt'), 'x')
     symlinkSync(join(root, 'realdir'), join(root, 'linkdir'))
