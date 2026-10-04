@@ -10,12 +10,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Git Bash (MSYS) `ln -s` deep-copies directories by default — copying this
-# repo (node_modules + full .git history) would be catastrophic. Force real
-# native symlinks instead: the GitHub Windows runners (Developer Mode, admin
-# user) can create them, and nativestrict makes ln fail loudly rather than
-# silently falling back to a copy. Inert on Linux/macOS.
-export MSYS="winsymlinks:nativestrict"
+# Fixture links use Windows junctions or native directory symlinks.
+# Never copy the repository or require privileged Windows symlinks.
 
 # The check reads the BUILT declaration surface (lib/types) — fail loudly
 # instead of silently passing when the build output is missing.
@@ -34,12 +30,12 @@ mkdir -p "$WORK/node_modules"
 # for tsc (TS2307 on a link that visibly exists). Node's NATIVE realpath
 # (GetFinalPathNameByHandle on Windows) expands junctions, which bash-level
 # resolution may leave untouched; node is guaranteed here (tsc runs below).
-resolve_dir() { node -e 'process.stdout.write(require("node:fs").realpathSync.native(process.argv[1]))' "$1"; }
-ln -s "$(resolve_dir "$(pwd)")" "$WORK/node_modules/dsh-better-sidebar"
+link_dir() { node -e 'const fs = require("node:fs"); fs.symlinkSync(fs.realpathSync.native(process.argv[1]), process.argv[2], process.platform === "win32" ? "junction" : "dir")' "$1" "$2"; }
+link_dir "$(pwd)" "$WORK/node_modules/dsh-better-sidebar"
 # The vendored cordis base (and, through its realpath, cosmokit / standard-schema)
 # must resolve so the consumer can type `Context` against the DSH runtime scope.
 mkdir -p "$WORK/node_modules/@deepseek-ai"
-ln -s "$(resolve_dir "$(pwd)/node_modules/@deepseek-ai/cordis")" "$WORK/node_modules/@deepseek-ai/cordis"
+link_dir "$(pwd)/node_modules/@deepseek-ai/cordis" "$WORK/node_modules/@deepseek-ai/cordis"
 # Loud guard: both links must resolve to a package root, or tsc below would
 # report misleading module-resolution errors.
 for pkg_json in "$WORK/node_modules/dsh-better-sidebar/package.json" "$WORK/node_modules/@deepseek-ai/cordis/package.json"; do
