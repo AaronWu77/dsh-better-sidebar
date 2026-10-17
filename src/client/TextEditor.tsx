@@ -19,11 +19,9 @@ import clsx from 'clsx'
 import { EditorState } from '@codemirror/state'
 import { EditorView as CodeMirrorView, keymap, lineNumbers } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
-import { IconCheckOutlineRegular, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
-import { markdownTextProps } from './markdown-labels.tsx'
+import { IconCheckOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import { api, htmlUrl } from './api.ts'
 import { markdownPreviewSource } from './markdown-frontmatter.ts'
-import { rewriteLocalImageUrls } from './markdown-images.ts'
 import { languageForPath } from './lang.ts'
 import { cmSurfaceTheme, CmThemeCompartment } from './cm-themes.ts'
 import { isDarkScheme, subscribeColorScheme } from './theme.ts'
@@ -32,9 +30,8 @@ import { appendToDraft } from './conversation-draft.ts'
 import { useSelectionPopup } from './selection-popup.ts'
 import { buildSelectionInsert, linesOfSelection } from './selection-payload.ts'
 import { analyzeMarkdownHtml } from './markdown-html.ts'
-import { LazyMermaidMarkdown, MarkdownDocument, type MarkdownHtmlMedia } from './MarkdownHtml.tsx'
+import { MarkdownDocument, type MarkdownHtmlMedia } from './MarkdownHtml.tsx'
 import { MdToc } from './md-toc.tsx'
-import { splitMermaidBlocks } from './mermaid-blocks.ts'
 import { t } from './locales.ts'
 import { HTML_IFRAME_SANDBOX } from './html-preview.ts'
 import type { EditorToolbarState, FileViewerProps } from './service.ts'
@@ -327,32 +324,10 @@ export function TextEditor(props: FileViewerProps) {
     requestAnimationFrame(() => { restoringRef.current = false })
   }, [mode, previewMdText])
 
-  /** The preview source with local image destinations rewritten to absolute
-   *  media URLs (see {@link rewriteLocalImageUrls}). */
-  const previewText = markdown
-    ? rewriteLocalImageUrls(previewMdText, scope, path, window.location.origin)
-    : previewMdText
-  /** md/mermaid block split for the preview (mermaid fences lift out). Split
-   *  only in preview mode: edit-mode keystrokes must not re-scan the source. */
-  const mdBlocks = useMemo(
-    () => (markdown && mode === 'preview' ? splitMermaidBlocks(previewMdText) : []),
-    [markdown, mode, previewMdText],
-  )
-  /** Raw-HTML analysis (block runs lifted out + inline gate). Non-null for
-   *  every markdown preview, so the render below always takes the split
-   *  renderer — its markdown runs rewrite local image destinations internally
-   *  (see MarkdownHtml.tsx). The legacy single-pass branches (fed the
-   *  pre-rewritten `previewText`) are dead in the current wiring. */
+  /** Every Markdown preview uses the document-scoped renderer, including plain README files. */
   const htmlInfo = useMemo(
     () => (markdown && mode === 'preview' ? analyzeMarkdownHtml(previewMdText) : null),
     [markdown, mode, previewMdText],
-  )
-  const hasMermaid = useMemo(
-    () => htmlInfo !== null
-      ? htmlInfo.segments.some((segment) => segment.kind === 'markdown'
-        && splitMermaidBlocks(segment.text).some((block) => block.kind === 'mermaid'))
-      : mdBlocks.some((block) => block.kind === 'mermaid'),
-    [htmlInfo, mdBlocks],
   )
   /** The media context for the split renderer (local-src rewriting inside
    *  sanitized HTML). Memoized on primitives: MarkdownDocument sanitizes per
@@ -513,27 +488,13 @@ export function TextEditor(props: FileViewerProps) {
             selectionPopup.hide()
           }}
         >
-          {/* The fence copy-button labels must come from this plugin's own
-              dictionary: the DSH MarkdownText/CodeBlock are cordis-free and
-              fall back to hardcoded Chinese otherwise (same pattern as the
-              chat's AssistantMarkdown). Render-time t() keeps them following
-              the active locale on live switches. Plain markdown (no HTML)
-              renders exactly as before — one MarkdownText pass for the whole
-              document, or the mermaid lazy chunk (single markdown parse;
-              cross-fence references/footnotes stay intact) when a mermaid
-              fence exists. Documents containing HTML (block runs or inline
-              tags) render through the split document renderer: markdown runs
-              keep the MarkdownText/mermaid path while raw-HTML runs render
-              as sanitized DOM (see markdown-html.tsx). */}
+          {/* Copy labels follow this plugin's locale. The document renderer
+              shares scoped navigation across Markdown, Mermaid and sanitized HTML. */}
           {/* The outline button rides on top of the preview scroll container
               (sticky, zero-height — first child so it pins from the very
               top) once the document has enough headings. */}
           <MdToc />
-          {htmlInfo !== null
-            ? <MarkdownDocument info={htmlInfo} media={htmlMedia} codeLabels={codeLabels} />
-            : hasMermaid
-              ? <LazyMermaidMarkdown text={previewText} codeLabels={codeLabels} />
-              : <MarkdownText {...markdownTextProps(previewText, codeLabels)} />}
+          {htmlInfo !== null && <MarkdownDocument info={htmlInfo} media={htmlMedia} codeLabels={codeLabels} openFile={(_owner, target) => { props.onOpenFile?.(target) }} />}
         </div>
       )}
       {html && mode === 'preview' && (

@@ -28,6 +28,8 @@ export interface FsSearchOptions {
   maxMatches?: number
   /** Total entries visited before the walk gives up (default 100_000). */
   maxVisited?: number
+  /** Stop traversal on caller cancellation; directory iterators close before rejection. */
+  signal?: AbortSignal
 }
 
 const DEFAULT_MAX_MATCHES = 200
@@ -65,12 +67,13 @@ const SEARCH_SKIP_DIRS = new Set([
  * (case-insensitive).
  * @param root - absolute search root.
  * @param query - the name substring; empty matches nothing.
- * @param opts - budget overrides (tests).
+ * @param opts - budget overrides and optional caller cancellation; directory iterators close before rejection.
  * @returns the matching paths RELATIVE to `root` ('/'-separated), sorted,
  *  plus whether a budget cut the walk short. An unreadable level is skipped
  *  (permission errors never fail the whole search).
  */
 export async function searchFiles(root: string, query: string, opts: FsSearchOptions = {}): Promise<FsSearchResult> {
+  opts.signal?.throwIfAborted()
   const needle = query.trim().toLowerCase()
   if (needle === '') return { matches: [], truncated: false }
   const maxMatches = opts.maxMatches ?? DEFAULT_MAX_MATCHES
@@ -81,10 +84,12 @@ export async function searchFiles(root: string, query: string, opts: FsSearchOpt
   let truncated = false
 
   const walk = async (dir: string): Promise<void> => {
+    opts.signal?.throwIfAborted()
     if (truncated) return
     const level = await opendir(dir).catch(() => undefined)
     if (level === undefined) return
     for await (const dirent of level) {
+      opts.signal?.throwIfAborted()
       visited += 1
       if (visited > maxVisited) {
         truncated = true
@@ -108,6 +113,7 @@ export async function searchFiles(root: string, query: string, opts: FsSearchOpt
     }
   }
   await walk(root)
+  opts.signal?.throwIfAborted()
   // '/' separators on every platform: the client joins onto the cwd itself.
   return { matches: matches.sort().map(path => path.split(sep).join('/')), truncated }
 }

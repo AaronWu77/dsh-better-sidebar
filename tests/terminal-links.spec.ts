@@ -284,4 +284,3 @@ describe('openTerminalUrl', () => {
     expect(open).not.toHaveBeenCalled()
   })
 })
-

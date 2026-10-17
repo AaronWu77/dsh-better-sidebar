@@ -16,6 +16,7 @@
  * workspace.
  */
 import { afterAll, describe, expect, it } from 'vitest'
+import { authenticatedHostService } from './authenticated-host-fixture.ts'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -76,9 +77,9 @@ function mount(cwd: string): SidebarWebRoute[] {
     // runs, so the workspace fence keeps its documented default (enabled).
     inject: () => () => {},
     on: () => () => {},
-    get: () => undefined,
+    get: authenticatedHostService,
   }
-  apply(ctx as never)
+  apply({ ...ctx, provide: () => () => {} } as never)
   return routes
 }
 

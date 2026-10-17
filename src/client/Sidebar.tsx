@@ -544,7 +544,7 @@ export function Sidebar(props: { ctx: Context; store: SidebarStore }) {
       if (tab?.type === 'terminal') {
         if (isAgentTabId(tabId)) {
           const uuid = agentUuidOf(tabId)
-          void api.agentPtyClose(uuid).catch(() => { /* the host may already have released it */ })
+          if (sessionId !== undefined) void api.agentPtyClose({ sessionId, cwd }, uuid).catch(() => { /* the host may already have released it */ })
         } else if (sessionId !== undefined) {
           void api.ptyClose({ sessionId, cwd }, tabId).catch(() => { /* the host may already have released it */ })
         }

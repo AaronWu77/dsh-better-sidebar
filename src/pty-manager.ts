@@ -13,9 +13,7 @@ import { userInfo } from 'node:os'
 import type { IPty } from 'node-pty'
 import { loadRequiredNodePty, type NodePtyModule } from './pty-deps.ts'
 import { SidebarError } from './wire.ts'
-
-/** Per-terminal transcript bound (bytes kept for replay). */
-const TRANSCRIPT_LIMIT = 1 << 20
+import { TERMINAL_TRANSCRIPT_LIMIT as TRANSCRIPT_LIMIT } from './remote-terminal-registry.ts'
 
 /**
  * Restore the executable bit pnpm strips from node-pty's prebuilt

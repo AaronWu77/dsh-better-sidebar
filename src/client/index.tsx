@@ -11,7 +11,8 @@
 import { createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import type { Context } from '../context-types.ts'
-import { allLeaves, createSidebarStore, isAgentTabId } from './state.ts'
+import { createSidebarStore } from './state.ts'
+import { subscribeTerminalTitle } from './terminal-title.ts'
 import { createBetterSidebarService, matchUrlTarget } from './service.ts'
 import { revalidateChunksOnReactivate, setChunkModuleSystem } from './chunk-loader.ts'
 import { registerBuiltins } from './builtins/index.ts'
@@ -169,18 +170,7 @@ export function apply(ctx: Context): void {
   // terminal tabs that still carry it.
   const fallbackTitle = t('terminal')
   let terminalTitle = fallbackTitle
-  void api.shellGet().then(({ name }) => {
-    terminalTitle = name
-    const snapshot = service.getSnapshot()
-    if (snapshot.state === undefined) return
-    const tabs = allLeaves(snapshot.state.bottomSplits)
-      .flatMap(leaf => leaf.tabs)
-    for (const tab of tabs) {
-      if (tab.type === 'terminal' && !isAgentTabId(tab.id) && tab.title === fallbackTitle) {
-        service.updateTab(tab.id, { title: name })
-      }
-    }
-  }).catch(() => { /* keep fallback */ })
+  ctx.effect(() => subscribeTerminalTitle(service, fallbackTitle, api.shellGet, name => { terminalTitle = name }), 'Session-selected terminal title')
   // Register the plugin's own built-in tabs and viewers through the same
   // service (eating our own dogfood). The disposer unregisters them on
   // fiber disposal (HMR-safe).

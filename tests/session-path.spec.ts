@@ -4,6 +4,29 @@ import { resolveSessionPath } from '../src/session-path.ts'
 const WSL_CWD = '\\\\wsl.localhost\\archlinux\\home\\zdaar\\project'
 
 describe('resolveSessionPath', () => {
+  it.each(["/wsl.localhost/Ubuntu-22.04/home/aaronwu/SuperPlus/README.md","\\wsl.localhost\\Ubuntu-22.04\\home\\aaronwu\\SuperPlus\\README.md"])('restores the explicit WSL share for %s in a Windows drive workspace', path => {
+    expect(resolveSessionPath('D:/deepseek-harness', path, 'win32')).toBe("\\\\wsl.localhost\\Ubuntu-22.04\\home\\aaronwu\\SuperPlus\\README.md")
+  })
+
+  it('honours an explicitly named distro rather than projecting it under the Session distro', () => {
+    expect(resolveSessionPath(WSL_CWD, '/wsl.localhost/Ubuntu-22.04/home/aaronwu/SuperPlus/README.md', 'win32')).toBe("\\\\wsl.localhost\\Ubuntu-22.04\\home\\aaronwu\\SuperPlus\\README.md")
+  })
+
+  it('supports the older wsl$ share alias without changing the named distro', () => {
+    expect(resolveSessionPath('D:/work', '/wsl$/Ubuntu/home/file.md', 'win32')).toBe("\\\\wsl$\\Ubuntu\\home\\file.md")
+    expect(resolveSessionPath("\\\\wsl$\\Ubuntu\\home\\work", '/home/file.md', 'win32')).toBe("\\\\wsl$\\Ubuntu\\home\\file.md")
+  })
+
+  it('preserves spaces, Unicode and file-address punctuation under the share', () => {
+    expect(resolveSessionPath('D:/work', '/WSL.LOCALHOST/Ubuntu/home/用户/My Project/a#b?.md', 'win32')).toBe("\\\\wsl.localhost\\Ubuntu\\home\\用户\\My Project\\a#b?.md")
+  })
+
+  it('does not repair ordinary POSIX paths or similarly named hosts', () => {
+    expect(resolveSessionPath('D:/work', '/wsl.localhost.evil/Ubuntu/home/file', 'win32')).toBe('/wsl.localhost.evil/Ubuntu/home/file')
+    expect(resolveSessionPath('/work', '/wsl.localhost/Ubuntu/home/file', 'linux')).toBe('/wsl.localhost/Ubuntu/home/file')
+    expect(resolveSessionPath('/work', '/wsl.localhost/Ubuntu/home/file', 'darwin')).toBe('/wsl.localhost/Ubuntu/home/file')
+  })
+
   it('maps a Linux absolute path into the WSL distro root on win32', () => {
     expect(resolveSessionPath(WSL_CWD, '/home/zdaar/project/src/a.ts', 'win32'))
       .toBe('\\\\wsl.localhost\\archlinux\\home\\zdaar\\project\\src\\a.ts')

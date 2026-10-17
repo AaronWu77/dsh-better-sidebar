@@ -38,6 +38,10 @@ export interface SidebarHttpRequest {
   url?: string
   method?: string
   headers: Record<string, string | string[] | undefined>
+  /** HTTP cancellation hooks supplied by the native web server. */
+  aborted?: boolean
+  on?(event: 'aborted', listener: () => void): unknown
+  off?(event: 'aborted', listener: () => void): unknown
   [Symbol.asyncIterator](): AsyncIterator<string | Uint8Array>
 }
 
@@ -45,12 +49,18 @@ export interface SidebarHttpRequest {
  *  ServerResponse: the status/header/body writes the routes use). */
 export interface SidebarHttpResponse {
   statusCode: number
+  /** Distinguish a completed response from a browser disconnect. */
+  writableEnded?: boolean
+  destroyed?: boolean
+  on?(event: 'close', listener: () => void): unknown
+  off?(event: 'close', listener: () => void): unknown
   writeHead(status: number, headers?: Record<string, string>): void
   end(body?: string | Uint8Array): void
 }
 
-/** The upgrade socket face (structural subset: the destroy the fences use). */
+/** The upgrade socket face used to reject handshakes before WebSocket allocation. */
 export interface SidebarUpgradeSocket {
+  end(data: string): void
   destroy(): void
 }
 
@@ -360,8 +370,9 @@ export interface SidebarSessionTitleService {
  * DSH 0.1.5 replaced the detached `inspect(id)` call with an explicit read
  * handle: `open(id, 'read')` never takes write ownership and works while
  * another process owns the session, `handle.read()` returns one contiguous
- * slice of the log, and `close()` releases it. Every cold read in this plugin
- * goes through {@link readPersistedSession} so the handle is always closed.
+ * slice of the log, and `close()` releases it. Header-only workspace routing
+ * closes its read handle without reading events; event consumers use
+ * {@link readPersistedSession}, which also closes the handle.
  */
 export interface SidebarSessionPersistenceService {
   open(sessionId: string, access: 'read' | 'write'): Promise<SidebarSessionHandle>
@@ -490,20 +501,6 @@ export interface SidebarConversation {
   }
 }
 
-/**
- * The invariant service face (mirror of @deepseek-ai/dsh-invariants'
- * InvariantRegistry). The upstream augmentation does not reach this Context
- * (dual-cordis-instance resolution), so the register signature is restated
- * structurally, exactly like the other service faces above.
- */
-export interface SidebarInvariantsService {
-  /** Reserve one package's checks and install them in the service's child fiber. */
-  register(
-    packageName: string,
-    installer: (ctx: Context, fail: (message: string) => never) => void | Promise<void>,
-  ): () => void
-}
-
 /** The settings service face (mirror of @deepseek-ai/dsh-settings' SettingsForms). */
 export interface SidebarSettingsService {
   /**
@@ -565,8 +562,6 @@ export interface SidebarContextShape {
   slots: SidebarSlotsService
   /** The settings service face (prefs persistence + namespace reads). */
   settings: SidebarSettingsService
-  /** The invariant registry face. */
-  invariants: SidebarInvariantsService
   /** The tool registry face. */
   tools: SidebarToolsService
   /** The client locale service face. */

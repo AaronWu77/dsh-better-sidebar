@@ -17,6 +17,7 @@ import { stat, readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context, SidebarHttpRequest, SidebarHttpResponse } from './context-types.ts'
+import { rejectSidebarHttp, type SidebarRequestRejection } from './authentication.ts'
 
 /** The chunk names the client may request (mirror of src/client/chunk-loader.ts). */
 export const CHUNK_NAMES = ['terminal', 'editor', 'mermaid', 'locale'] as const
@@ -62,20 +63,17 @@ async function etagOf(name: ChunkName, chunkDir: string): Promise<string | undef
 }
 
 /**
- * Build the /sidebar/bundle route handler. `fence` is the shared browser-
- * trust check every /sidebar route applies; `chunkDir` is the directory the
- * chunk scripts live in (overridable for tests).
+ * Build the authenticated lazy-bundle handler.
+ * @param admission Host browser admission check, including login authentication.
+ * @param chunkDir Directory containing the chunk scripts.
+ * @returns Handler that rejects before any chunk lookup.
  */
 export function createBundleRouteHandler(
-  fence: (req: SidebarHttpRequest) => boolean,
+  admission: SidebarRequestRejection,
   chunkDir: string = LIB_DIR,
 ): (req: SidebarHttpRequest, res: SidebarHttpResponse) => Promise<void> {
   return async (req, res): Promise<void> => {
-    if (!fence(req)) {
-      res.writeHead(403)
-      res.end('forbidden')
-      return
-    }
+    if (rejectSidebarHttp(admission, req, res)) return
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.writeHead(405)
       res.end()
@@ -120,10 +118,10 @@ export function createBundleRouteHandler(
 }
 
 /** Register the /sidebar/bundle route (disposed with the fiber). */
-export function registerBundleRoute(ctx: Context, fence: (req: SidebarHttpRequest) => boolean): () => void {
+export function registerBundleRoute(ctx: Context, admission: SidebarRequestRejection): () => void {
   return ctx.webServer.register({
     kind: 'prefix',
     path: '/sidebar/bundle',
-    handler: createBundleRouteHandler(fence),
+    handler: createBundleRouteHandler(admission),
   })
 }

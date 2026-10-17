@@ -277,6 +277,8 @@ export interface FileViewerProps {
   mediaUrl?: string
   /** custom load() return value (fetchStrategy='custom'). */
   customData?: unknown
+  /** Open a document link on this viewer's Session using the host's file-open preference. */
+  onOpenFile?: (path: string) => void
   /** Internal (built-in text editor): 'host' asks the viewer to skip its own
    *  toolbar row — the editor host's merged-mode header renders it instead,
    *  fed through the two callbacks below. Viewers that ignore these fields
@@ -680,7 +682,7 @@ export function matchUrlTarget(tabs: readonly TabDescriptor[], url: URL): TabDes
  * The plugin version this service instance reports. Keep in lockstep with
  * `package.json`'s version — `tests/service.spec.ts` asserts the pair.
  */
-export const SIDEBAR_SERVICE_VERSION = '0.19.1'
+export const SIDEBAR_SERVICE_VERSION = '0.19.3-remote.6'
 
 /**
  * Monotonic capability list consumers use to gate new API usage (features
@@ -978,6 +980,12 @@ export function createBetterSidebarService(store: SidebarStore): BetterSidebarSe
           surface.openResource({
             sessionId: targetSessionId,
             address: surface.fileAddress(targetSessionId, scope?.cwd, seed.path),
+            ...(seed.title === undefined && seed.meta === undefined ? {} : {
+              params: {
+                ...(seed.title === undefined ? {} : { title: seed.title }),
+                ...(seed.meta === undefined ? {} : { meta: seed.meta }),
+              },
+            }),
             revealIfOpened: focusIfOpened,
             ...split,
           })

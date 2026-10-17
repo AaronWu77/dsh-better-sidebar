@@ -59,7 +59,13 @@
 
 > 🔌 **Core principle**: service-first — the 8 built-in tabs + 6 viewers register through the same `ctx.betterSidebar` API as third-party plugins, with fully equal capabilities; anything the ecosystem can provide better is delegated to ecosystem plugins (**28+ ecosystem plugins** already — see "🌐 Plugin Ecosystem" below). See "🔌 Service API" and the [external plugin guide](./docs/external-plugin-guide.md).
 
+## Windows / WSL file paths
+
+Windows file opening preserves the WSL UNC namespace. A single-leading-separator `/wsl.localhost/<distro>/…` or `/wsl$/<distro>/…` is restored to UNC before drive resolution, rather than becoming `D:/wsl.localhost/…`. Existing UNC and drive paths and non-Windows hosts retain their semantics; `/home/…` in a WSL Session still uses that Session distro. Realpath, symlink and workspaceFence checks remain in force; opening does not disable the fence or send a local WSL file to an SSH host.
+
 ## 🚀 Installation
+
+The isolated candidate is `0.19.3-remote.6`, paired with Remote SSH `0.2.4-aaron.12-sidebar.6`. With the native editor enabled, conversation file links retain their remote Session address rather than becoming local download-cache paths; produced-file, directory and Git editor opens retain their source Session and intent. Stop the production service before installing both packages; preparing these archives does not update the running GUI. See the [file-navigation upgrade guide](docs/upgrade-guide/v0.19.3-remote.5/remote-file-navigation/guide.md). Remote search protocol and limits remain unchanged; this release does not optimize large-workspace search latency.
 
 **Prerequisites**: DSH installed (`dsh web` boots), Node.js ≥ 20, pnpm ≥ 10.
 
@@ -611,7 +617,7 @@ The dashed cards at the end of the "Sidebar content" / "File viewers" grids in t
 pnpm install      # @deepseek-ai/* devDependencies resolve (baseline 0.1.2-rc.1, next dist-tag) — no token needed
 pnpm typecheck    # tsc --noEmit
 pnpm lint         # eslint . (flat config: js + typescript-eslint + react-hooks recommended)
-pnpm build        # → lib/index.js + lib/invariant.js + lib/client.js + lib/client-registry.js + lib/types
+pnpm build        # → lib/index.js + lib/client.js + lib/client-registry.js + lib/types (DSH alpha.2 has no dsh-invariants companion)
 pnpm test         # vitest (includes manifest consistency guard; build first)
 pnpm watch        # tsdown --watch
 ```
@@ -630,7 +636,10 @@ make clean          # remove lib/, *.tgz, playwright-report/, test-results/
 
 ## 🔐 Security
 
-- Routes protected by a Host-header trust fence (same as `/api`); `fs.write` is atomic; media/preview routes only serve files inside the session cwd; git only shells out to the CLI and never sets identity
+- Every sidebar HTTP route and WebSocket handshake uses the host's `connection.requestRejection` to check login cookies and Host/Origin trust before reading bodies or allocating terminals. Missing login returns 401; untrusted requests return 403. This candidate requires a host exposing that API; see the [authentication upgrade guide](docs/upgrade-guide/v0.19.2/sidebar-authentication/guide.md). `fs.write` is atomic; media/preview containment follows the workspace-fence setting; Git uses the CLI without setting identity.
+- Workspace requests use only the live or read-only persisted session header's `cwd` and ignore browser directory hints. Unknown sessions and invalid session directories are rejected, without falling back to the host process directory. See the [session workspace upgrade guide](docs/upgrade-guide/v0.19.2/sidebar-session-workspace/guide.md).
+- A host with `remoteSshManager` must also register the sidebar workspace router; a missing contribution returns 503 rather than choosing a local filesystem. Providers use the type-only `dsh-better-sidebar/workspace-provider` entry and contribute through `ctx.sidebarWorkspaceProviders` with owned effects. The `0.19.3-auth.2` tarball is authentication-only and does not include this integration.
+- Remote UI/model terminals persist across park and bare disconnects, replay bounded raw VT, and are explicitly closed with their owning Session key. Missing node-pty blocks only local allocation. Agent UUID attachment and close/skip requests require `sessionId`; see the [remote terminal migration guide](docs/upgrade-guide/v0.19.2/sidebar-remote-terminals/guide.md). Stop the service before installing the matched `0.19.3-remote.3` and `0.2.4-aaron.12-sidebar.3` archives.
 - HTML preview and browser tab content render in **opaque-origin sandboxed iframes** (no `allow-same-origin`/`allow-top-navigation`, `no-referrer`, all permission policies disabled); the `/sidebar/html` route carries a CSP `sandbox` + size/path bounds; the address bar rejects `javascript:`/`data:`/`file:` and local addresses like localhost
 - The UI shows the sandbox status live (red warning when off) and can temporarily unlock the current page; the settings page can disable the sandbox per feature (disabled by default, with a warning) — when off, content shares the origin with the UI; only recommended for fully trusted content
 

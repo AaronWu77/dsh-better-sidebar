@@ -9,16 +9,18 @@
  *
  * Security posture: every HTML string (block leaves, inline text, wrapper
  * open-tag attributes) goes through DOMPurify with an explicit denylist on
- * top of its defaults (no script/style/iframe/forms), anchors are forced to
- * open in a new tab with noopener, and local media goes through the
- * session-scoped `/sidebar/file` media route — markdown-syntax image
+ * top of its defaults (no script/style/iframe/forms), external anchors open
+ * in a new tab with noopener, local links stay session-scoped, and local media
+ * uses the `/sidebar/file` route — markdown-syntax image
  * destinations are rewritten via `markdown-images.ts` and `src` attributes
  * through `resolveLocalMediaDest` (the same trust fence).
  */
 import { useLayoutEffect, useMemo, useRef } from 'react'
 import { createElement, type ReactNode } from 'react'
 import DOMPurify from 'dompurify'
-import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
+import { MarkdownDelegateProvider, MarkdownText, type MarkdownDelegate } from '@deepseek-ai/dsh-client-ui-primitives'
+import { documentDestination, documentMarkdownLinks, type DocumentDestination } from './markdown-document-path.ts'
+import type { BetterSidebarService } from './service.ts'
 import { markdownTextProps } from './markdown-labels.tsx'
 import { resolveLocalMediaDest, rewriteLocalImageUrls } from './markdown-images.ts'
 import {
@@ -53,16 +55,22 @@ const PURIFY_FORBID_TAGS = [
   'select', 'textarea', 'meta', 'link', 'base', 'frame', 'frameset', 'applet',
 ]
 const PURIFY_FORBID_ATTR = ['srcdoc', 'formaction']
+// DOMPurify's default URI allowlist plus same-session absolute Windows drive paths.
+const PURIFY_ALLOWED_URI = /^(?:[a-z]:[\\/]|(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix):|[^a-z]|[a-z+.-]+(?:[^-a-z+.:]|$))/i
 
 /**
- * Post-sanitize hardening on a detached element tree: anchors open in a new
- * tab (never navigate the GUI), and local media sources go through the media
+ * Post-sanitize hardening on a detached element tree: external anchors open in
+ * a new tab, and local media sources go through the media
  * route so they render instead of being dropped by protocol allowlists.
  */
 function postProcessSanitized(root: Element, media: MarkdownHtmlMedia): void {
   for (const anchor of root.querySelectorAll('a[href]')) {
-    anchor.setAttribute('target', '_blank')
-    anchor.setAttribute('rel', 'noopener noreferrer')
+    if (documentDestination(anchor.getAttribute('href')!, media.path).kind === 'external') {
+      anchor.setAttribute('target', '_blank')
+      anchor.setAttribute('rel', 'noopener noreferrer')
+    } else {
+      anchor.removeAttribute('target')
+    }
   }
   for (const element of root.querySelectorAll('img, video, audio, source')) {
     const src = element.getAttribute('src')
@@ -77,6 +85,7 @@ function sanitizeHtmlBlock(source: string, media: MarkdownHtmlMedia): string {
   holder.innerHTML = DOMPurify.sanitize(source, {
     FORBID_TAGS: PURIFY_FORBID_TAGS,
     FORBID_ATTR: PURIFY_FORBID_ATTR,
+    ALLOWED_URI_REGEXP: PURIFY_ALLOWED_URI,
   })
   postProcessSanitized(holder, media)
   return holder.innerHTML
@@ -92,6 +101,7 @@ function sanitizeInlineHtml(text: string, media: MarkdownHtmlMedia): string | nu
   holder.innerHTML = DOMPurify.sanitize(text, {
     FORBID_TAGS: PURIFY_FORBID_TAGS,
     FORBID_ATTR: PURIFY_FORBID_ATTR,
+    ALLOWED_URI_REGEXP: PURIFY_ALLOWED_URI,
   })
   if (holder.firstElementChild === null) return null
   postProcessSanitized(holder, media)
@@ -109,6 +119,7 @@ function sanitizeTagProps(tag: string, attrs: string): Record<string, string> | 
   const probe = DOMPurify.sanitize(`<${tag}${attrs}></${tag}>`, {
     FORBID_TAGS: PURIFY_FORBID_TAGS,
     FORBID_ATTR: PURIFY_FORBID_ATTR,
+    ALLOWED_URI_REGEXP: PURIFY_ALLOWED_URI,
   })
   const holder = document.createElement('div')
   holder.innerHTML = probe
@@ -147,12 +158,27 @@ function runInlineHtmlPass(container: HTMLElement, media: MarkdownHtmlMedia): vo
   const targets: Text[] = []
   for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) targets.push(node as Text)
   for (const node of targets) {
-    const html = sanitizeInlineHtml(node.data, media)
+    if (node.parentElement === null) continue
+    let source = node.data
+    const joined: Text[] = []
+    // React separates an inline anchor's tags and label into adjacent text nodes.
+    if (/<a\b[^>]*>/i.test(source) && !/<\/a\s*>/i.test(source)) {
+      for (let sibling = node.nextSibling; sibling !== null; sibling = sibling.nextSibling) {
+        if (sibling.nodeType === Node.COMMENT_NODE) continue
+        if (!(sibling instanceof Text)) break
+        source += sibling.data
+        joined.push(sibling)
+        if (/<\/a\s*>/i.test(sibling.data)) break
+      }
+      if (!/<\/a\s*>/i.test(source)) { source = node.data; joined.length = 0 }
+    }
+    const html = sanitizeInlineHtml(source, media)
     if (html === null) continue
     const span = document.createElement('span')
     span.setAttribute('data-html-inline', '')
     span.innerHTML = html
     node.replaceWith(span)
+    for (const sibling of joined) sibling.remove()
   }
 }
 
@@ -161,6 +187,7 @@ interface MarkdownSegmentProps {
   hasMermaid: boolean
   media: MarkdownHtmlMedia
   codeLabels: { copyLabel: string; copiedLabel: string }
+  navigate: (destination: DocumentDestination) => void
 }
 
 /**
@@ -171,29 +198,41 @@ interface MarkdownSegmentProps {
  * mermaid chunk mounting, shiki highlighting settling) — it is idempotent and
  * skips its own output, so mutation feedback settles after one extra pass.
  */
-function MarkdownSegment({ text, hasMermaid, media, codeLabels }: MarkdownSegmentProps): ReactNode {
+function MarkdownSegment({ text, hasMermaid, media, codeLabels, navigate }: MarkdownSegmentProps): ReactNode {
   const containerRef = useRef<HTMLDivElement>(null)
+  const links = useMemo(() => documentMarkdownLinks(text, media.path), [text, media.path])
+  const openFile: MarkdownDelegate['openFile'] = (path) => {
+    navigate(links.destinations.get(path) ?? documentDestination(encodeURIComponent(path), media.path))
+  }
   useLayoutEffect(() => {
     const container = containerRef.current
     if (container === null) return
+    for (const button of container.querySelectorAll('button[title]')) {
+      const destination = links.destinations.get(button.getAttribute('title')!)
+      if (destination?.kind === 'file') button.setAttribute('title', destination.path)
+      else if (destination?.kind === 'anchor') button.setAttribute('title', `#${destination.fragment}`)
+    }
     runInlineHtmlPass(container, media)
     let scheduled = false
+    let active = true
     const observer = new MutationObserver(() => {
       if (scheduled) return
       scheduled = true
       queueMicrotask(() => {
         scheduled = false
-        runInlineHtmlPass(container, media)
+        if (active) runInlineHtmlPass(container, media)
       })
     })
     observer.observe(container, { childList: true, subtree: true })
-    return () => { observer.disconnect() }
-  }, [text, media])
+    return () => { active = false; observer.disconnect() }
+  }, [text, media, links])
   return (
-    <div ref={containerRef}>
-      {hasMermaid
-        ? <LazyMermaidMarkdown text={text} codeLabels={codeLabels} />
-        : <MarkdownText {...markdownTextProps(text, codeLabels)} />}
+    <div key={text} ref={containerRef}>
+      <MarkdownDelegateProvider openFile={openFile}>
+        {hasMermaid
+          ? <LazyMermaidMarkdown text={links.text} codeLabels={codeLabels} />
+          : <MarkdownText {...markdownTextProps(links.text, codeLabels)} />}
+      </MarkdownDelegateProvider>
     </div>
   )
 }
@@ -219,6 +258,8 @@ interface MarkdownDocumentProps {
   info: AnalyzedMarkdownHtml
   media: MarkdownHtmlMedia
   codeLabels: { copyLabel: string; copiedLabel: string }
+  /** The owner's public service callback; no unscoped local fallback. */
+  openFile?: BetterSidebarService['openFile']
 }
 
 /**
@@ -230,7 +271,18 @@ interface MarkdownDocumentProps {
  * frames still open at the end of the document are closed like a browser
  * parser would. Sanitization runs once per prepared change, in a memo.
  */
-export function MarkdownDocument({ info, media, codeLabels }: MarkdownDocumentProps): ReactNode {
+export function MarkdownDocument({ info, media, codeLabels, openFile }: MarkdownDocumentProps): ReactNode {
+  const documentRef = useRef<HTMLDivElement>(null)
+  const navigate = (destination: DocumentDestination): void => {
+    if (destination.kind === 'file') {
+      // The public service opens paths only; fragments are kept separate by the resolver.
+      openFile?.({ sessionId: media.scope.sessionId, cwd: media.scope.cwd }, destination.path)
+    } else if (destination.kind === 'anchor') {
+      const target = [...(documentRef.current?.querySelectorAll('[id], a[name]') ?? [])]
+        .find(element => element.id === destination.fragment || element.getAttribute('name') === destination.fragment)
+      target?.scrollIntoView({ block: 'start' })
+    }
+  }
   const prepared = useMemo<PreparedSegment[]>(() => info.segments.map((segment): PreparedSegment => {
     if (segment.kind === 'markdown') {
       const defs = info.referenceDefinitions
@@ -268,7 +320,7 @@ export function MarkdownDocument({ info, media, codeLabels }: MarkdownDocumentPr
   let key = 0
   for (const segment of prepared) {
     if (segment.kind === 'markdown') {
-      emit(<MarkdownSegment key={`md-${key += 1}`} text={segment.text} hasMermaid={segment.hasMermaid} media={media} codeLabels={codeLabels} />)
+      emit(<MarkdownSegment key={`md-${key += 1}`} text={segment.text} hasMermaid={segment.hasMermaid} media={media} codeLabels={codeLabels} navigate={navigate} />)
       continue
     }
     for (const part of segment.parts) {
@@ -296,5 +348,13 @@ export function MarkdownDocument({ info, media, codeLabels }: MarkdownDocumentPr
       emit(createElement(frame.tag, { ...frame.props, key: `wrap-${key += 1}` }, ...frame.children))
     }
   }
-  return <>{nodes}</>
+  return <div ref={documentRef} onClickCapture={(event) => {
+    const anchor = event.target instanceof Element ? event.target.closest('a[href]') : null
+    if (anchor === null || !event.currentTarget.contains(anchor)) return
+    const destination = documentDestination(anchor.getAttribute('href')!, media.path)
+    if (destination.kind === 'external') return
+    event.preventDefault()
+    event.stopPropagation()
+    navigate(destination)
+  }}>{nodes}</div>
 }

@@ -43,6 +43,10 @@ interface UploadSession {
   controller: AbortController
 }
 
+/** File tree and Session-rooted filename search, including folder-rooted tree pages.
+ * @param props Tree scope, navigation callbacks and Sidebar services.
+ * @returns Tree rows or current-query matches resolved against the authoritative Session cwd.
+ */
 export function TreePanel(props: {
   sessionId: string
   cwd: string | undefined
@@ -76,7 +80,7 @@ export function TreePanel(props: {
 }) {
   const { sessionId, cwd, store, expanded, revealed, onToggle, onOpenFile, onOpenFileNewTab, onOpenFileSide, openWithTargets, openWithPinned, openWithSsh, onOpenWith, onToggleOpenWithPin, onReferenceFile, onPathRenamed, onPathDeleted, full, service } = props
   const [query, setQuery] = useState('')
-  const [results, setResults] = useState<{ matches: string[]; truncated: boolean } | null>(null)
+  const [results, setResults] = useState<{ matches: string[]; truncated: boolean; cwd: string } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [refreshTick, setRefreshTick] = useState(0)
 
@@ -159,10 +163,17 @@ export function TreePanel(props: {
       setError(null)
       return
     }
+    setResults(null)
+    setError(null)
     const controller = new AbortController()
     const timer = window.setTimeout(() => {
-      api.fsSearch({ sessionId, cwd }, needle, controller.signal).then((found) => {
-        setResults(found)
+      // Matches belong to the authoritative Session root, not a folder tab's tree root.
+      Promise.all([
+        api.sessionCwd({ sessionId, cwd }, controller.signal),
+        api.fsSearch({ sessionId, cwd }, needle, controller.signal),
+      ]).then(([scope, found]) => {
+        if (controller.signal.aborted) return
+        setResults({ ...found, cwd: scope.cwd })
         setError(null)
       }).catch((failure: unknown) => {
         if (controller.signal.aborted) return
@@ -279,7 +290,7 @@ export function TreePanel(props: {
               type="button"
               className={css.editorSearchResult}
               title={rel}
-              onClick={() => { onOpenFile(resolveSidebarPath(cwd, rel)) }}
+              onClick={() => { onOpenFile(resolveSidebarPath(results.cwd, rel)) }}
             >
               {rel}
             </button>

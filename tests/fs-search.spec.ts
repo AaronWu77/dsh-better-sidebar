@@ -6,7 +6,7 @@
  * never descended (cycle safety), and the maxMatches/maxVisited budgets
  * stop a runaway walk with `truncated: true`.
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -157,6 +157,30 @@ describe('fs-search', () => {
       expect(result.truncated).toBe(true)
       expect(result.matches).toEqual([])
     } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a pre-aborted search with the caller reason, including a blank query', async () => {
+    const controller = new AbortController(), reason = new Error('obsolete query')
+    controller.abort(reason)
+    await expect(searchFiles('missing-root', 'file', { signal: controller.signal })).rejects.toBe(reason)
+    await expect(searchFiles('missing-root', '', { signal: controller.signal })).rejects.toBe(reason)
+  })
+
+  it('stops during directory iteration and settles before the caller removes its scratch tree', async () => {
+    const dir = makeFixture(), controller = new AbortController(), reason = new Error('cancel walk')
+    const check = controller.signal.throwIfAborted.bind(controller.signal)
+    let checks = 0
+    const observation = vi.spyOn(controller.signal, 'throwIfAborted').mockImplementation(() => {
+      if (++checks === 3) controller.abort(reason)
+      check()
+    })
+    try {
+      await expect(searchFiles(dir, '.md', { signal: controller.signal })).rejects.toBe(reason)
+      expect(observation).toHaveBeenCalledTimes(3)
+    } finally {
+      observation.mockRestore()
       rmSync(dir, { recursive: true, force: true })
     }
   })

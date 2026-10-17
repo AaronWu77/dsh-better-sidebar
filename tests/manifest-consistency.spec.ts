@@ -19,6 +19,7 @@ import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { CHUNK_NAMES } from '../src/bundle-route.ts'
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 
@@ -43,6 +44,7 @@ interface PluginManifest {
 interface PackageJson {
   name: string
   version: string
+  files: string[]
 }
 
 const manifest = JSON.parse(readFileSync(resolve(ROOT, 'dsh.plugin.json'), 'utf8')) as PluginManifest
@@ -70,8 +72,14 @@ function bundleId(file: string): string {
   return match[1]!
 }
 
-/** The lazy chunk bundle names (mirror of src/bundle-route.ts CHUNK_NAMES). */
-const CHUNK_FILES = ['terminal', 'editor', 'mermaid'].map(name => `lib/client-${name}.js`)
+/** Every chunk registered by the host must be published with the client. */
+const CHUNK_FILES = CHUNK_NAMES.map(name => `lib/client-${name}.js`)
+
+describe('lazy chunk publication', () => {
+  it('publishes every chunk registered by the host route', () => {
+    for (const file of CHUNK_FILES) expect(pkg.files, file).toContain(file)
+  })
+})
 
 /** The global registry slot a built chunk script assigns (its factory key). */
 function chunkSlot(file: string): string {

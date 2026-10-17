@@ -11,9 +11,10 @@
  * - merged (in-place): tree click / path-input Enter switch the CURRENT
  *   tab in place (updateTab rewrites path/title; the tab keeps its id and
  *   meta, so treeOpen/treeWidth survive the switch);
- * - split: they open through `openSidebarFile` (a per-path dedupe tab),
- *   and a PATH-LESS window is the standalone explorer — it renders ONLY
- *   the tree panel (search + FileTree, full-window), no editor chrome.
+ * - split: they open a per-path dedupe tab in the native body's session,
+ *   independent of the bottom workbench's selected session (`openSidebarFile`
+ *   remains the workbench path). A PATH-LESS window is the standalone explorer —
+ *   it renders ONLY the tree panel (search + FileTree, full-window), no editor chrome.
  *   Editor tabs (with a path) keep the full chrome in both modes.
  * The tree's context menu offers the explicit escapes in both modes: open
  * in a new tab (per-path dedupe) or to the side (a fresh tab in a fresh
@@ -156,16 +157,20 @@ export function EditorHost(props: {
   /**
    * Open a file from THIS window (tree click / search row / path input):
    * merged mode switches this tab in place (stable id, meta survives);
-   * split mode opens a per-path dedupe tab through openSidebarFile.
+   * split mode opens a per-path dedupe tab in this body's session.
    */
   const openFile = (absolute: string): void => {
     // Merged mode: the CURRENT tab takes the file. The path-less explorer
     // page rewrites its record in place; an address-backed file tab is
     // re-addressed by the native surface (same pane, same strip slot, the
     // old tab closes), so one tab follows the clicks. Split mode opens a
-    // per-path dedupe tab through openSidebarFile instead.
+    // per-path dedupe tab in this body's session instead.
+    const service = ctx.get('betterSidebar')
     if (inPlace && !isDir) {
-      ctx.get('betterSidebar')?.updateTab(tab.id, { path: absolute, title: baseName(absolute) })
+      service?.updateTab(tab.id, { path: absolute, title: baseName(absolute) })
+    } else if (service?.native) {
+      // Native bodies can mount before the bottom workbench selects a session.
+      service.openFile(scope, absolute)
     } else {
       openSidebarFile(ctx, store, scope.sessionId, absolute)
     }
@@ -509,6 +514,7 @@ export function EditorHost(props: {
             truncated: load.truncated,
             mediaUrl: load.mediaUrl,
             customData: load.customData,
+            onOpenFile: openFile,
             // The viewer's toolbar always hoists into this host's header.
             toolbar: 'host',
             onToolbarState,

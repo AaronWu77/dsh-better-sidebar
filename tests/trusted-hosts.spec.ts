@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'vitest'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { apply } from '../src/index.ts'
+import { isTrustedApiRequest } from '../src/trust-fence.ts'
 import type { SidebarWebRoute, SidebarWebUpgradeRoute } from '../src/context-types.ts'
 
 interface FakeRes {
@@ -70,7 +71,7 @@ function mount(initialTrustedHosts: readonly string[] = []): {
       register: (route: SidebarWebRoute) => { routes.push(route); return () => {} },
       registerUpgrade: (route: SidebarWebUpgradeRoute) => { upgrades.push(route); return () => {} },
     },
-    sessions: { get: () => undefined },
+    sessions: { get: (id: string) => id === 'test-session' ? { header: { cwd: process.cwd() }, snapshotEvents: () => [] } : undefined },
     tools: { register: () => () => {} },
     effect: (fn: () => void | (() => void)) => {
       const cleanup = fn()
@@ -79,9 +80,12 @@ function mount(initialTrustedHosts: readonly string[] = []): {
     inject: () => () => {},
     // The session/agent event feeds: nothing emits in these tests.
     on: () => () => {},
-    get: () => undefined,
+    get: (key: string) => key === 'connection' ? {
+      requestRejection: (request: IncomingMessage): 403 | undefined =>
+        isTrustedApiRequest(request, runtime.trustedHosts) ? undefined : 403,
+    } : undefined,
   }
-  apply(ctx as never)
+  apply({ ...ctx, provide: () => () => {} } as never)
   const api = routes.find(route => route.path === '/sidebar/api')?.handler
   if (api === undefined) throw new Error('test setup: /sidebar/api route not registered')
   return {

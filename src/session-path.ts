@@ -1,37 +1,37 @@
 import { win32 } from 'node:path'
 
-/** `\\wsl.localhost\<distro>` root of a Windows-hosted WSL workspace. */
-const WSL_LOCALHOST_ROOT = /^\\\\wsl\.localhost\\([^\\]+)(?:\\|$)/i
+/** Windows-hosted WSL share, with either supported hostname and separator spelling. */
+const WSL_ROOT = /^\/\/(wsl\.localhost|wsl\$)\/([^/]+)(?:\/|$)/i
+/** An explicit WSL share whose second leading separator was lost by a caller. */
+const WSL_ROOTED_TARGET = /^\/(wsl\.localhost|wsl\$)\/([^/]+)(?:\/|$)/i
 
 /**
- * Reinterpret an already-absolute path in the namespace of one session.
- *
- * Windows treats `/foo` as rooted on the current drive, so `path.resolve()`
- * turns it into e.g. `C:\\foo`. That is wrong for a session whose cwd is a
- * WSL UNC path: in that namespace `/foo` means the distro's Linux `/foo`.
- * Project only that unambiguous combination onto the matching distro root;
- * drive paths, UNC paths, ordinary Windows sessions and non-Windows hosts
- * keep their existing semantics.
- *
- * Workspace containment is intentionally NOT handled here. A projected path
- * such as `/tmp/x` can still be rejected later for lying outside the session
- * workspace; the important part is that it is checked as WSL `/tmp/x`, not
- * silently redirected to `C:\\tmp\\x`.
+ * Resolve an absolute path in the Windows Session's filesystem namespace.
+ * Explicit single-separator WSL share addresses regain their UNC root before
+ * drive resolution. Linux absolute paths in WSL Sessions use that Session's
+ * distro. Other Windows paths and all non-Windows hosts retain their spelling.
+ * The caller still resolves symlinks and enforces workspace containment.
+ * @param cwd - Authoritative Session directory, not browser-supplied context.
+ * @param target - Requested absolute or workspace-relative path.
+ * @param platform - Filesystem host platform.
+ * @returns A WSL UNC path when projection is needed, otherwise the input.
  */
 export function resolveSessionPath(
   cwd: string,
   target: string,
   platform: NodeJS.Platform = process.platform,
 ): string {
-  if (platform !== 'win32' || !/^\/(?!\/)/.test(target)) return target
-
-  // Session cwd can be spelled with either separator style. Normalize only
-  // for detection; the returned host path is always canonical win32 UNC.
-  const normalizedCwd = cwd.replace(/\//g, '\\')
-  const match = WSL_LOCALHOST_ROOT.exec(normalizedCwd)
-  if (match === null) return target
-
-  const distroRoot = `\\\\wsl.localhost\\${match[1]}`
-  const relative = target.slice(1).replace(/\//g, '\\')
-  return win32.resolve(distroRoot, relative)
+  if (platform !== 'win32') return target
+  const normalizedTarget = target.replace(/\\/g, '/')
+  const explicit = WSL_ROOTED_TARGET.exec(normalizedTarget)
+  if (explicit !== null) {
+    const distroRoot = '\\\\' + explicit[1]!.toLowerCase() + '\\' + explicit[2]!
+    return win32.resolve(distroRoot, normalizedTarget.slice(explicit[0].length).replace(/\//g, '\\'))
+  }
+  if (!target.startsWith('/') || target.startsWith('//')) return target
+  const normalizedCwd = cwd.replace(/\\/g, '/')
+  const session = WSL_ROOT.exec(normalizedCwd)
+  if (session === null) return target
+  const distroRoot = '\\\\' + session[1]!.toLowerCase() + '\\' + session[2]!
+  return win32.resolve(distroRoot, target.slice(1).replace(/\//g, '\\'))
 }

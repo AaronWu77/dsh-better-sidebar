@@ -365,6 +365,7 @@ export function NativeTabBody(props: NativeBodyInjected & NativeBodyFrameworkPro
         revealed: view.revealed,
         onToggleDir: (path: string) => { records.toggleExpanded(nativeTab.id, path) },
         onReferenceFile: (path: string, isDir: boolean) => { referenceInChat(ctx, sessionId, cwd, path, isDir) },
+        onOpenFile: (path: string) => { service.openFile(scope, path) },
         onOpenDiff: (tab: SidebarTab) => {
           service.openTab({
             type: 'diff',

@@ -65,18 +65,16 @@ function sessionIdOf(exec: ToolRunContext): string {
 
 /**
  * Register the eight terminal tools against the host tool registry. The
- * `resolveCwd` callback threads the live session cwd (authoritative from the
- * session store, falling back to the process cwd) so a freshly-created
- * terminal lands in the right directory without the model passing it.
+ * selected create callback routes allocation through the authoritative Session
+ * workspace. Without that callback, resolveCwd selects a local terminal only.
  * Every uuid-keyed tool first asserts the terminal belongs to the calling
  * session (`registry.assertOwned`), so one agent can never reach another
  * session's terminals.
  * @param ctx - host plugin context (carries the tools service).
  * @param registry - the agent-owned terminal registry.
- * @param resolveCwd - async cwd resolver for one session id. Resolves through
- *  the session header, the client-supplied cwd, and the persistence index
- *  before falling back to the host process cwd (production always provides
- *  persistence, so the fallback is reached only in tests / stripped-down hosts).
+ * @param resolveCwd - authoritative local cwd resolver used only without createTerminal.
+ * @param readShellOverrides - local shell settings, never read for a remote allocation.
+ * @param createTerminal - optional selected-host allocator that acknowledges initial input and honors cancellation.
  * @returns a disposer that unregisters all eight tools (the caller gates
  * registration on the side-card setting and calls this to turn them off).
  */
@@ -85,6 +83,7 @@ export function registerTools(
   registry: AgentPtyRegistry,
   resolveCwd: (sessionId: string) => Promise<string>,
   readShellOverrides: () => { shell?: string; shellArgs?: string[] },
+  createTerminal?: (sessionId: string, title: string, command: string, signal: AbortSignal) => Promise<string>,
 ): () => void {
   const disposers: Array<() => void> = []
   const register = (tool: ReturnType<typeof defineTool>): void => {
@@ -130,9 +129,13 @@ export function registerTools(
     execute: async (args: { title: string; command: string }, exec) => {
       exec.signal.throwIfAborted()
       const sessionId = sessionIdOf(exec)
-      const cwd = await resolveCwd(sessionId)
-      const { shell, shellArgs } = readShellOverrides()
-      const uuid = registry.create(sessionId, args.title, args.command, cwd, 80, 24, shell, shellArgs)
+      let uuid: string
+      if (createTerminal !== undefined) uuid = await createTerminal(sessionId, args.title, args.command, exec.signal)
+      else {
+        const cwd = await resolveCwd(sessionId)
+        const { shell, shellArgs } = readShellOverrides()
+        uuid = registry.create(sessionId, args.title, args.command, cwd, 80, 24, shell, shellArgs)
+      }
       return { uuid, title: args.title }
     },
   }))
@@ -217,12 +220,12 @@ export function registerTools(
         `Sent ${v.bytes} byte(s) to terminal ${v.uuid}.`,
       ),
     },
-    execute: (args: { uuid: string; text: string; submit?: boolean }, exec) => {
+    execute: async (args: { uuid: string; text: string; submit?: boolean }, exec) => {
       exec.signal.throwIfAborted()
       const sessionId = sessionIdOf(exec)
       registry.assertOwned(args.uuid, sessionId)
       const payload = args.submit === true ? `${args.text}\r` : args.text
-      registry.send(args.uuid, payload)
+      await registry.send(args.uuid, payload)
       return Promise.resolve({ uuid: args.uuid, bytes: Buffer.byteLength(payload, 'utf8') })
     },
   }))
@@ -413,11 +416,11 @@ export function registerTools(
         `Resized terminal ${v.uuid} to ${v.cols}×${v.rows}.`,
       ),
     },
-    execute: (args: { uuid: string; cols: number; rows: number }, exec) => {
+    execute: async (args: { uuid: string; cols: number; rows: number }, exec) => {
       exec.signal.throwIfAborted()
       const sessionId = sessionIdOf(exec)
       registry.assertOwned(args.uuid, sessionId)
-      const dims = registry.resize(args.uuid, args.cols, args.rows)
+      const dims = await registry.resize(args.uuid, args.cols, args.rows)
       return Promise.resolve({ uuid: args.uuid, ...dims })
     },
   }))
@@ -430,6 +433,7 @@ export function registerTools(
       + 'signal="SIGKILL" to force-kill the pty, signal="SIGHUP" to hang up (many shells exit), signal="SIGTSTP" for Ctrl+Z (suspend). '
       + 'Do NOT try to send control characters (like "\\u0003") through terminal_send — use this tool instead. '
       + 'On Windows, only SIGKILL and SIGTERM are effective — others are accepted but may no-op. '
+      + 'Remote terminals send SIGINT/SIGTSTP as control keys; SIGTERM/SIGKILL/SIGHUP request acknowledged backend termination rather than a named POSIX signal. '
       + 'No-op if the terminal has already exited. Use terminal_close to dispose of the terminal entirely.',
     parameters: {
       uuid: { type: 'string', required: true, description: 'Terminal uuid from terminal_create or terminal_list.' },
@@ -453,11 +457,11 @@ export function registerTools(
         `Sent ${v.signal} to terminal ${v.uuid}.`,
       ),
     },
-    execute: (args: { uuid: string; signal: AgentTerminalSignal }, exec) => {
+    execute: async (args: { uuid: string; signal: AgentTerminalSignal }, exec) => {
       exec.signal.throwIfAborted()
       const sessionId = sessionIdOf(exec)
       registry.assertOwned(args.uuid, sessionId)
-      registry.signal(args.uuid, args.signal)
+      await registry.signal(args.uuid, args.signal)
       return Promise.resolve({ uuid: args.uuid, signal: args.signal })
     },
   }))
@@ -485,11 +489,11 @@ export function registerTools(
         v.closed ? `Closed terminal ${v.uuid}.` : `Terminal ${v.uuid} was already closed.`,
       ),
     },
-    execute: (args: { uuid: string }, exec) => {
+    execute: async (args: { uuid: string }, exec) => {
       exec.signal.throwIfAborted()
       const sessionId = sessionIdOf(exec)
       registry.assertOwned(args.uuid, sessionId)
-      const closed = registry.close(args.uuid)
+      const closed = await registry.close(args.uuid)
       return Promise.resolve({ uuid: args.uuid, closed })
     },
   }))

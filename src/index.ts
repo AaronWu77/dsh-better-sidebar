@@ -3,11 +3,9 @@
  * read/write, git), the /sidebar/file media route (images), the /sidebar/html
  * preview route, the /sidebar/bundle lazy-chunk route (client code splits),
  * and the terminal WebSocket upgrade. Every route passes the same
- * browser-trust fence as the /api gateway — Host-header loopback or the
- * web runtime's `trustedHosts` (LAN IP literals sampled at boot plus
- * `--trusted-host` authorities), read per request from the live service
- * value so the fence tracks the same trust source the /api gateway derives
- * its list from.
+ * authenticated browser admission as the /api gateway. Connection owns
+ * Host/Origin validation and login cookies; every request and WebSocket
+ * handshake is checked before session access or resource allocation.
  *
  * All operations are conversation-scoped: requests carry a sessionId, the
  * session's authoritative cwd comes from the session store, and terminal
@@ -35,15 +33,23 @@ import { resolveSessionPath } from './session-path.ts'
 import { renameWorkspaceEntry, removeWorkspaceEntry, writeWorkspaceUpload } from './fs-operations.ts'
 import { ensureWorkspacePath, ensureWorkspaceWritePath, resolveWorkspaceTarget } from './path-security.ts'
 import { searchFiles } from './fs-search.ts'
+import { observeSearchRequest } from './search-request.ts'
 import { decodeHtmlUrl } from './html-route.ts'
 import { extractFrameAncestors } from './browser-probe.ts'
-import { isTrustedApiRequest, isLoopbackHostname } from './trust-fence.ts'
+import { isLoopbackHostname } from './trust-fence.ts'
+import { browserAdmission, rejectSidebarHttp, rejectSidebarUpgrade } from './authentication.ts'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { resolveSidebarSessionScope } from './session-scope.ts'
+import { SidebarWorkspaceProviders, type SidebarWorkspaceRoute } from './workspace-provider.ts'
+import type { GitBackend, GitClient } from './git.ts'
 import { registerBundleRoute } from './bundle-route.ts'
 import { launchExternal } from './open-external.ts'
 import * as git from './git.ts'
 import { SettingsConflictError } from '@deepseek-ai/dsh-settings'
 import { defaultShell, ensureSpawnHelper, PtyManager, shellDisplayName, splitShellArgs, unquotePath } from './pty-manager.ts'
-import { AgentPtyRegistry, armPtyResizeGate, tryResizePty, type AgentTerminalHandle } from './agent-pty.ts'
+import { AgentPtyRegistry, armPtyResizeGate, tryResizePty, clampDims, type AgentTerminalHandle } from './agent-pty.ts'
+import { RemoteTerminalRegistry, RemoteTerminalHandle } from './remote-terminal-registry.ts'
+import { captureTerminalInput, terminalInputText } from './terminal-attach-input.ts'
 import {
   DSH_NODE_PTY_RANGE,
   depsStatus,
@@ -85,8 +91,8 @@ export type {
 /** Plugin identity for cordis.yml rows. */
 export const name = 'dsh-better-sidebar'
 
-/** Services required before mounting: the webserver routes, the session store, the web runtime's trusted hosts, and the tool registry. */
-export const inject = ['webServer', 'sessions', 'webRuntime', 'tools']
+/** Required services include Connection's authenticated HTTP and upgrade admission. */
+export const inject = ['webServer', 'sessions', 'tools', 'connection']
 
 /** Content types for the media route, by extension. */
 const MEDIA_TYPES: Record<string, string> = {
@@ -109,52 +115,24 @@ export function mediaTypeForPath(path: string): string {
   return MEDIA_TYPES[extname(path).toLowerCase()] ?? 'application/octet-stream'
 }
 
-/**
- * Resolve a session's authoritative working directory. The attached session
- * header wins; while the session is still hydrating from persistence (the
- * web client attaches the current conversation a moment after page load, so
- * the very first sidebar requests can arrive detached) the caller's own
- * list-summary cwd is used; the session-persistence index is queried as a
- * last resort for cold (not-yet-attached) sessions so a detached first
- * request still resolves the correct project instead of the host process
- * cwd (which on Windows is the DSH source root after `dsh.cmd`'s `pushd`,
- * causing every user-project path to be misclassified as "outside
- * workspace"). The host process cwd is the FINAL fallback for deployments
- * without persistence (tests / stripped-down hosts); production always
- * provides persistence, so the bug-fix path (header → client → persistence)
- * always resolves the real session cwd before reaching it.
- */
-async function sessionCwdOf(ctx: Context, sessionId: string, clientCwd?: string): Promise<string> {
-  const session = ctx.sessions.get(sessionId)
-  const headerCwd = session?.header.cwd
-  if (headerCwd !== undefined && headerCwd !== '') return headerCwd
-  if (clientCwd !== undefined && clientCwd !== '') {
-    try {
-      return requireAbsolute(clientCwd)
-    } catch {
-      throw new SidebarError('bad-request', `invalid working directory "${clientCwd}"`)
-    }
-  }
-  const persistence = ctx.get('sessionPersistence')
-  if (persistence !== undefined) {
-    const persisted = await readPersistedSession(persistence, sessionId)
-    const metaCwd = persisted.header.cwd
-    if (metaCwd !== undefined && metaCwd !== '') {
-      try {
-        return requireAbsolute(metaCwd)
-      } catch {
-        throw new SidebarError('bad-request', `invalid working directory "${metaCwd}"`)
-      }
-    }
-  }
-  return process.cwd()
+/** Resolve a positively selected local workspace, rejecting remote routes. */
+async function localWorkspaceCwdOf(ctx: Context, providers: SidebarWorkspaceProviders, sessionId: string): Promise<string> {
+  const workspace = await sessionWorkspaceOf(ctx, providers, sessionId)
+  if (workspace.kind === 'remote') throw new SidebarError('workspace-unavailable', 'This sidebar operation has no remote backend attached', 501)
+  return workspace.cwd
 }
 
 /** Optional repository selected by the Git panel when cwd is a container. */
-function selectedRepoOf(payload: unknown): string | undefined {
+function selectedRepoOf(payload: unknown, workspace: SidebarWorkspaceRoute): string | undefined {
   const record = payload as { repoRoot?: unknown }
   if (record.repoRoot === undefined) return undefined
-  return requireAbsolute(requireString(payload, 'repoRoot'))
+  const path = requireString(payload, 'repoRoot')
+  return workspace.kind === 'remote' ? workspace.paths.absolute(path) : requireAbsolute(path)
+}
+
+async function sessionWorkspaceOf(ctx: Context, providers: SidebarWorkspaceProviders, sessionId: string): Promise<SidebarWorkspaceRoute> {
+  const scope = await resolveSidebarSessionScope(ctx.sessions, ctx.get('sessionPersistence'), SessionId(sessionId))
+  return providers.resolve(scope)
 }
 
 /**
@@ -164,16 +142,31 @@ function selectedRepoOf(payload: unknown): string | undefined {
  * paths pass through; relative ones join the repo root (falling back to the
  * cwd when the root cannot be resolved, e.g. a bare directory).
  */
-async function resolveGitPath(cwd: string, raw: string, selected?: string): Promise<string> {
+async function resolveGitPath(cwd: string, raw: string, selected: string | undefined, workspace: SidebarWorkspaceRoute, backend: GitClient): Promise<string> {
+  if (workspace.kind === 'remote') {
+    if (workspace.paths.isAbsolute(raw)) return workspace.paths.absolute(raw)
+    const sessionPath = workspace.paths.join(cwd, raw)
+    if (await workspace.fs.exists(sessionPath)) return sessionPath
+    try {
+      return workspace.paths.join(await backend.repoRoot(cwd, selected), raw)
+    } catch (error) {
+      if (error instanceof git.GitCommandError && error.code === 'not-repo') return sessionPath
+      throw error
+    }
+  }
   if (isAbsolute(raw)) return requireAbsolute(resolveSessionPath(cwd, raw))
-  // Prefer the session-relative interpretation when it names an existing
-  // path. Git status reports repository-root-relative names, but the sidebar
-  // security boundary is the session workspace; this preference keeps files
-  // inside a nested session readable without reopening the repository root.
   const sessionPath = requireAbsolute(join(cwd, raw))
-  if (await stat(sessionPath).then(() => true).catch(() => false)) return sessionPath
-  const root = await git.repoRoot(cwd, selected).catch(() => cwd)
-  return requireAbsolute(join(root, raw))
+  const exists = await stat(sessionPath).then(() => true).catch((error: unknown) => {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return false
+    throw error
+  })
+  if (exists) return sessionPath
+  try {
+    return requireAbsolute(join(await backend.repoRoot(cwd, selected), raw))
+  } catch (error) {
+    if (error instanceof git.GitCommandError && error.code === 'not-repo') return sessionPath
+    throw error
+  }
 }
 
 /** How many leading bytes a binary read returns for client-side detect sniffing. */
@@ -220,8 +213,23 @@ async function readText(path: string, readLimit: number): Promise<{
   }
 }
 
+/** Read complete media bytes on the selected execution host. */
+async function readWorkspaceBytes(workspace: SidebarWorkspaceRoute, raw: string, limit: number, fence: boolean): Promise<{ path: string; body: Uint8Array }> {
+  if (workspace.kind === 'remote') {
+    const target = workspace.paths.isAbsolute(raw) ? workspace.paths.absolute(raw) : workspace.paths.join(workspace.cwd, raw)
+    const path = await workspace.fs.resolve(target, fence)
+    return { path, body: await workspace.fs.readBytes(path, limit, fence) }
+  }
+  const path = await ensureWorkspacePath(workspace.cwd, resolveWorkspaceTarget(workspace.cwd, raw), fence)
+  const info = await stat(path)
+  if (!info.isFile() || info.size > limit) throw new SidebarError('fs-error', 'not a file or too large', 400)
+  const body = await readFile(path)
+  if (body.byteLength > limit) throw new SidebarError('too-large', 'file exceeds media byte limit', 413)
+  return { path, body }
+}
+
 /** One API method dispatch table entry. */
-type ApiMethod = (payload: unknown) => Promise<unknown> | unknown
+type ApiMethod = (payload: unknown, signal?: AbortSignal) => Promise<unknown> | unknown
 
 /**
  * The live face of the side card settings namespace, bound to the settings
@@ -307,20 +315,32 @@ function buildApi(
   terminalShell: string,
   getSettings: () => SidebarSettingsFace | undefined,
   assistantLive: AssistantLiveBuffer,
+  workspaceProviders: SidebarWorkspaceProviders,
+  remoteTerminals: RemoteTerminalRegistry,
 ): Record<string, ApiMethod> {
-  const cwdOf = async (payload: unknown): Promise<{ sessionId: string; cwd: string }> => {
+  const gitClients = new WeakMap<GitBackend, GitClient>()
+  const cwdOf = async (payload: unknown) => {
     const sessionId = requireString(payload, 'sessionId')
-    const record = payload as { cwd?: unknown } | null
-    const clientCwd = typeof record?.cwd === 'string' && record.cwd !== '' ? record.cwd : undefined
-    return { sessionId, cwd: await sessionCwdOf(ctx, sessionId, clientCwd) }
+    const workspace = await sessionWorkspaceOf(ctx, workspaceProviders, sessionId)
+    let backend: GitClient = git
+    if (workspace.kind === 'remote') {
+      const cached = gitClients.get(workspace.git)
+      backend = cached ?? git.createGitClient(workspace.git)
+      if (cached === undefined) gitClients.set(workspace.git, backend)
+    }
+    return { sessionId, cwd: workspace.cwd, workspace, backend }
   }
-  /** Resolve the optional Git-panel checkout selector against the authoritative
-   * session repository. Unlike `cwd`, `worktree` is never trusted directly. */
-  const gitCwdOf = async (payload: unknown): Promise<{ sessionId: string; cwd: string }> => {
+  /** Validate linked checkouts against the selected repository on the same host. */
+  const gitCwdOf = async (payload: unknown) => {
     const base = await cwdOf(payload)
     const record = payload as { worktree?: unknown } | null
-    const requested = typeof record?.worktree === 'string' && record.worktree !== '' ? record.worktree : undefined
-    return { sessionId: base.sessionId, cwd: await git.resolveWorktree(base.cwd, requested) }
+    const selected = selectedRepoOf(payload, base.workspace)
+    const raw = typeof record?.worktree === 'string' && record.worktree !== '' ? record.worktree : undefined
+    if (raw === undefined) return { ...base, repoRoot: selected }
+    const requested = base.workspace.kind === 'remote' ? base.workspace.paths.absolute(raw) : requireAbsolute(raw)
+    const repository = await base.backend.repoRoot(base.cwd, selected)
+    const cwd = await base.backend.resolveWorktree(repository, requested)
+    return { ...base, cwd, repoRoot: undefined }
   }
   // Background jobs: the LIST rides the harness's `session/jobs` push
   // mirror, so these routes only replay output the model has read (from the
@@ -334,39 +354,53 @@ function buildApi(
   const subagentLiveApi: SidebarSubagentLiveRoutes = buildSubagentLiveApi(ctx)
   return {
     'session.cwd': async (payload) => {
-      const { sessionId, cwd } = await cwdOf(payload)
+      const { sessionId, cwd, workspace } = await cwdOf(payload)
+      if (workspace.kind === 'remote') {
+        const parent = workspace.paths.dirname(cwd)
+        return { sessionId, cwd, root: workspace.paths.basename(cwd) || cwd, parent: parent === cwd ? null : parent }
+      }
       return { sessionId, cwd, root: rootLabel(cwd), parent: parentOf(cwd) ?? null }
     },
     'fs.tree': async (payload) => {
-      const { cwd } = await cwdOf(payload)
+      const { cwd, workspace } = await cwdOf(payload)
       const record = payload as { path?: unknown }
+      if (workspace.kind === 'remote') return workspace.fs.list(record.path === undefined ? cwd : requireString(payload, 'path'), resolved.listLimit, fenceEnabledOf(getSettings))
       const target = record.path === undefined ? cwd : await ensureWorkspacePath(cwd, requireString(payload, 'path'), fenceEnabledOf(getSettings))
       return listDirectory(target, resolved.listLimit)
     },
-    'fs.search': async (payload) => {
-      // The editor side panel's global name search: rooted at the session
-      // cwd (not caller-targetable — the walk is unbounded by design and
-      // must never escape the workspace), budgeted inside searchFiles.
-      const { cwd } = await cwdOf(payload)
+    'fs.search': async (payload, signal) => {
+      signal?.throwIfAborted()
+      const { cwd, workspace } = await cwdOf(payload)
+      signal?.throwIfAborted()
       const query = requireString(payload, 'query')
-      return searchFiles(cwd, query)
+      if (workspace.kind === 'remote') return workspace.fs.search(query, signal)
+      return searchFiles(cwd, query, { signal })
     },
     'fs.read': async (payload) => {
-      const { cwd } = await cwdOf(payload)
+      const { cwd, workspace, backend } = await cwdOf(payload)
       // Relative paths are git-derived (status/diff report repo-root-relative
       // names; the untracked diff view reads the file through this route). A
       // child-repo path is relative to the selected repoRoot, not the session
       // cwd; thread it so the path resolves inside the authorized workspace.
-      const selected = selectedRepoOf(payload)
-      const path = await ensureWorkspacePath(cwd, await resolveGitPath(cwd, requireString(payload, 'path'), selected), fenceEnabledOf(getSettings))
-      const { content, truncated, binary, size, head } = await readText(path, resolved.readLimit)
+      const selected = selectedRepoOf(payload, workspace)
+      const target = await resolveGitPath(cwd, requireString(payload, 'path'), selected, workspace, backend)
+      const fence = fenceEnabledOf(getSettings)
+      const result = workspace.kind === 'remote'
+        ? await workspace.fs.read(target, resolved.readLimit, fence)
+        : await readText(await ensureWorkspacePath(cwd, target, fence), resolved.readLimit)
+      const { content, truncated, binary, size, head } = result
       if (binary) return { kind: 'binary', size, truncated, head }
       return { kind: 'text', content, truncated }
     },
     'fs.write': async (payload) => {
-      const { cwd } = await cwdOf(payload)
-      const path = await ensureWorkspaceWritePath(cwd, requireString(payload, 'path'), fenceEnabledOf(getSettings))
+      const { cwd, workspace } = await cwdOf(payload)
       const content = requireString(payload, 'content')
+      const target = requireString(payload, 'path')
+      if (workspace.kind === 'remote') {
+        await workspace.fs.write(target, content, fenceEnabledOf(getSettings))
+        return { ok: true }
+      }
+      const path = await ensureWorkspaceWritePath(cwd, target, fenceEnabledOf(getSettings))
       const tmp = `${path}.dsh-sidebar-tmp-${process.pid}`
       try {
         await mkdir(dirname(path), { recursive: true })
@@ -382,7 +416,8 @@ function buildApi(
     // workspace-root refusals, link-aware (renames the row, not its target).
     // fs-operations.ts owns the containment and shape rules.
     'fs.rename': async (payload) => {
-      const { cwd } = await cwdOf(payload)
+      const { cwd, workspace } = await cwdOf(payload)
+      if (workspace.kind === 'remote') return workspace.fs.rename(requireString(payload, 'path'), requireString(payload, 'name'), fenceEnabledOf(getSettings))
       return renameWorkspaceEntry({
         cwd,
         path: requireString(payload, 'path'),
@@ -393,7 +428,8 @@ function buildApi(
     // The tree row's delete (permanent — the host has no trash): recursive
     // for directories, unlinks a symlink row without touching its target.
     'fs.remove': async (payload) => {
-      const { cwd } = await cwdOf(payload)
+      const { cwd, workspace } = await cwdOf(payload)
+      if (workspace.kind === 'remote') return workspace.fs.remove(requireString(payload, 'path'), fenceEnabledOf(getSettings))
       return removeWorkspaceEntry({
         cwd,
         path: requireString(payload, 'path'),
@@ -401,56 +437,55 @@ function buildApi(
       })
     },
     'git.worktrees': async (payload) => {
-      const { cwd } = await gitCwdOf(payload)
-      const selected = selectedRepoOf(payload)
+      const { cwd, backend, repoRoot } = await gitCwdOf(payload)
+      const selected = repoRoot
       // A workspace container (no repo at cwd) has child repos; the worktree
       // list belongs to the SELECTED child, not the container. Thread the
       // validated repoRoot so linked checkouts of a chosen child appear.
-      const base = selected !== undefined ? await git.repoRoot(cwd, selected).catch(() => cwd) : cwd
-      return git.worktrees(base)
+      const base = selected !== undefined ? await backend.repoRoot(cwd, selected) : cwd
+      return backend.worktrees(base)
     },
     'git.status': async (payload) => {
-      const { cwd } = await gitCwdOf(payload)
-      return git.status(cwd, selectedRepoOf(payload))
+      const { cwd, backend, repoRoot } = await gitCwdOf(payload)
+      return backend.status(cwd, repoRoot)
     },
     'git.diff': async (payload) => {
-      const { cwd } = await gitCwdOf(payload)
+      const { cwd, backend, repoRoot, workspace } = await gitCwdOf(payload)
       const record = payload as { path?: unknown; staged?: unknown }
-      const repoRoot = selectedRepoOf(payload)
-      const path = record.path === undefined ? undefined : await resolveGitPath(cwd, requireString(payload, 'path'), repoRoot)
-      return { diff: await git.diff(cwd, path, record.staged === true, repoRoot) }
+      const path = record.path === undefined ? undefined : await resolveGitPath(cwd, requireString(payload, 'path'), repoRoot, workspace, backend)
+      return { diff: await backend.diff(cwd, path, record.staged === true, repoRoot) }
     },
     'git.stage': async (payload) => {
-      const { cwd } = await gitCwdOf(payload)
+      const { cwd, backend, repoRoot } = await gitCwdOf(payload)
       const record = payload as { path?: unknown }
       const path = record.path === undefined ? undefined : requireString(payload, 'path')
-      await git.stage(cwd, path, selectedRepoOf(payload))
+      await backend.stage(cwd, path, repoRoot)
       return { ok: true }
     },
     'git.unstage': async (payload) => {
-      const { cwd } = await gitCwdOf(payload)
+      const { cwd, backend, repoRoot } = await gitCwdOf(payload)
       const record = payload as { path?: unknown }
       const path = record.path === undefined ? undefined : requireString(payload, 'path')
-      await git.unstage(cwd, path, selectedRepoOf(payload))
+      await backend.unstage(cwd, path, repoRoot)
       return { ok: true }
     },
     'git.commit': async (payload) => {
-      const { cwd } = await gitCwdOf(payload)
+      const { cwd, backend, repoRoot } = await gitCwdOf(payload)
       const message = requireString(payload, 'message')
-      await git.commit(cwd, message, selectedRepoOf(payload))
+      await backend.commit(cwd, message, repoRoot)
       return { ok: true }
     },
     'git.branch': async (payload) => {
-      const { cwd } = await gitCwdOf(payload)
-      return git.branches(cwd, selectedRepoOf(payload))
+      const { cwd, backend, repoRoot } = await gitCwdOf(payload)
+      return backend.branches(cwd, repoRoot)
     },
     'git.checkout': async (payload) => {
-      const { cwd } = await gitCwdOf(payload)
-      await git.checkout(cwd, requireString(payload, 'branch'), selectedRepoOf(payload))
+      const { cwd, backend, repoRoot } = await gitCwdOf(payload)
+      await backend.checkout(cwd, requireString(payload, 'branch'), repoRoot)
       return { ok: true }
     },
     'git.log': async (payload) => {
-      const { cwd } = await gitCwdOf(payload)
+      const { cwd, backend, repoRoot } = await gitCwdOf(payload)
       const record = payload as { count?: unknown; skip?: unknown }
       const count = typeof record.count === 'number' && Number.isInteger(record.count) && record.count > 0
         ? record.count
@@ -458,31 +493,29 @@ function buildApi(
       const skip = typeof record.skip === 'number' && Number.isInteger(record.skip) && record.skip >= 0
         ? record.skip
         : undefined
-      return git.log(cwd, count, skip, selectedRepoOf(payload))
+      return backend.log(cwd, count, skip, repoRoot)
     },
     'git.commit-diff': async (payload) => {
-      const { cwd } = await gitCwdOf(payload)
-      return { diff: await git.commitDiff(cwd, requireString(payload, 'hash'), selectedRepoOf(payload)) }
+      const { cwd, backend, repoRoot } = await gitCwdOf(payload)
+      return { diff: await backend.commitDiff(cwd, requireString(payload, 'hash'), repoRoot) }
     },
     'git.discard': async (payload) => {
-      const { cwd } = await gitCwdOf(payload)
-      const repoRoot = selectedRepoOf(payload)
-      await git.discard(cwd, await resolveGitPath(cwd, requireString(payload, 'path'), repoRoot), repoRoot)
+      const { cwd, backend, repoRoot, workspace } = await gitCwdOf(payload)
+      await backend.discard(cwd, await resolveGitPath(cwd, requireString(payload, 'path'), repoRoot, workspace, backend), repoRoot)
       return { ok: true }
     },
     'git.revert': async (payload) => {
-      const { cwd } = await gitCwdOf(payload)
-      await git.revert(cwd, requireString(payload, 'hash'), selectedRepoOf(payload))
+      const { cwd, backend, repoRoot } = await gitCwdOf(payload)
+      await backend.revert(cwd, requireString(payload, 'hash'), repoRoot)
       return { ok: true }
     },
     'git.cherry-pick': async (payload) => {
-      const { cwd } = await gitCwdOf(payload)
-      await git.cherryPick(cwd, requireString(payload, 'hash'), selectedRepoOf(payload))
+      const { cwd, backend, repoRoot } = await gitCwdOf(payload)
+      await backend.cherryPick(cwd, requireString(payload, 'hash'), repoRoot)
       return { ok: true }
     },
     'git.show': async (payload) => {
-      const { cwd } = await gitCwdOf(payload)
-      const repoRoot = selectedRepoOf(payload)
+      const { cwd, backend, repoRoot } = await gitCwdOf(payload)
       // `git show <rev>:<path>` addresses the path inside the revision TREE:
       // repository-relative, exactly the unified diff's own path form (after
       // the a// b/ prefix). The absolute filesystem paths resolveGitPath
@@ -491,7 +524,7 @@ function buildApi(
       // own revisions, the same surface git.diff/git.log already expose.
       const path = requireString(payload, 'path')
       const rev = requireString(payload, 'rev')
-      return { content: await git.show(cwd, rev, path, repoRoot) }
+      return { content: await backend.show(cwd, rev, path, repoRoot) }
     },
     // The session's file-tool events for the changes tab's session lens
     // (and its badge): the CLIENT runtime's sessions face has no event-log
@@ -535,11 +568,12 @@ function buildApi(
     // this while the socket is open; this route covers the tab-close that
     // happens while the socket is down (reconnect loop), so a closed tab can
     // never hold the per-session quota until the reconnect grace expires.
-    'pty.close': (payload) => {
+    'pty.close': async (payload) => {
       const sessionId = requireString(payload, 'sessionId')
       const tab = requireString(payload, 'tab')
       // Degraded mode (node-pty unavailable): no live pty can exist, so a
       // no-op ok is the honest answer — never an error the client must show.
+      await remoteTerminals.close(JSON.stringify([sessionId, tab]))
       ptyManager?.close(`${sessionId}:${tab}`)
       return { ok: true }
     },
@@ -547,9 +581,11 @@ function buildApi(
     // this while the socket is open; this route covers the tab-close that
     // happens while the socket is down (reconnect loop) so a closed agent
     // tab never leaves a zombie pty behind. Idempotent.
-    'agent-pty.close': (payload) => {
+    'agent-pty.close': async (payload) => {
       const uuid = requireString(payload, 'uuid')
-      agentPtyRegistry?.close(uuid)
+      const sessionId = requireString(payload, 'sessionId')
+      if (agentPtyRegistry?.get(uuid)) agentPtyRegistry.assertOwned(uuid, sessionId)
+      await agentPtyRegistry?.close(uuid)
       return { ok: true }
     },
     // The sidebar wait banner's skip button: abort every active
@@ -559,8 +595,10 @@ function buildApi(
     // Nothing waiting on a live terminal is not an error: 0 skipped.
     // Degraded mode (node-pty unavailable) has no registry and no waits: an
     // honest ok.
-    'agent-pty.skip-wait': (payload) => {
+    'agent-pty.skip-wait': async (payload) => {
       const uuid = requireString(payload, 'uuid')
+      const sessionId = requireString(payload, 'sessionId')
+      agentPtyRegistry?.assertOwned(uuid, sessionId)
       return { ok: true, skipped: agentPtyRegistry?.skipWait(uuid) ?? 0 }
     },
     // Terminal dependency status (issue #140): after a WS close 1011 with
@@ -583,7 +621,11 @@ function buildApi(
     // override when set (quotes stripped), else the boot-time resolution.
     // The client titles terminal tabs with the name, so a changed setting is
     // visible on the next opened tab without a plugin restart.
-    'shell.get': () => {
+    'shell.get': async payload => {
+      if ((payload as { sessionId?: unknown } | null)?.sessionId !== undefined) {
+        const { workspace } = await cwdOf(payload)
+        if (workspace.kind === 'remote') return { shell: workspace.terminalExecutable, name: shellDisplayName(workspace.terminalExecutable) }
+      }
       const effective = shellOverridesOf(getSettings).shell ?? terminalShell
       return { shell: effective, name: shellDisplayName(effective) }
     },
@@ -720,7 +762,7 @@ function buildApi(
 
 /**
  * Plugin body: mount the fenced routes and the pty lifecycle.
- * @param ctx - host plugin context (webServer, sessions, webRuntime).
+ * @param ctx - host plugin context with Web routes, Sessions, tools and connection admission.
  * @param config - deployment-provided limits; the Loader validates against
  * {@link Config} and fills defaults, direct callers get them from
  * {@link resolveSidebarConfig}.
@@ -735,11 +777,10 @@ export function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): vo
   // configured shell fixes one surface and silently leaves the other on the
   // platform default.
   const terminalShell = defaultShell({ explicit: resolved.shell })
-  // The web runtime's bind-derived trust list (boot-sampled LAN literals
-  // plus --trusted-host authorities) — the authoritative source the /api
-  // gateway fence derives its list from. Read per request from the live
-  // service value; a replaced list takes effect without a plugin restart.
-  const fence = (req: SidebarHttpRequest): boolean => isTrustedApiRequest(req, ctx.webRuntime.trustedHosts)
+  const admission = browserAdmission(ctx)
+  const workspaceProviders = new SidebarWorkspaceProviders(() => ctx.get('remoteSshManager') !== undefined)
+  ctx.effect(() => ctx.provide('sidebarWorkspaceProviders', workspaceProviders), 'Sidebar workspace providers')
+  ctx.inject(['remoteSshManager'], () => { workspaceProviders.requireRouter() })
   // node-pty is loaded lazily, never at module top level (issue #140): a
   // missing or broken install must degrade THIS plugin — terminal tab shows
   // a repair command, agent terminal tools stay unregistered — instead of
@@ -760,9 +801,15 @@ export function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): vo
   // uncapped, and torn down with the plugin. The model creates terminals here
   // through the terminal_create tool; the sidebar view attaches through the
   // same /sidebar/ws/terminal upgrade with ?uuid=... instead of ?tab=...
-  const agentPtyRegistry = nodePty !== null
-    ? new AgentPtyRegistry(terminalShell, resolved.shellArgs, nodePty)
-    : null
+  const agentPtyRegistry = new AgentPtyRegistry(terminalShell, resolved.shellArgs, nodePty)
+  const remoteTerminals = new RemoteTerminalRegistry(resolved.terminalsPerSession)
+  const sessionTerminalCleanup = new Set<Promise<void>>()
+  ctx.on('session/disposed', session => {
+    const cleanup = Promise.all([remoteTerminals.closeSession(session.id), agentPtyRegistry.closeSession(session.id)]).then(() => {})
+    sessionTerminalCleanup.add(cleanup)
+    void cleanup.catch(error => ctx.logger?.warn(String(error))).finally(() => sessionTerminalCleanup.delete(cleanup))
+    return cleanup
+  })
   // The model-facing open-request registry: queues `sidebar_open` requests
   // per session and pushes them to connected sidebar views over the
   // `/sidebar/ws/agent-opens` socket. Unlike the pty registry it has no
@@ -791,10 +838,14 @@ export function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): vo
   const syncToolsGate = (scope: { get(): SidebarPrefs }): void => {
     if (scope.get().agentTerminalTools) {
       if (toolsDisposers === null) {
-        // Degraded mode (node-pty unavailable): never register the terminal
-        // tools — every one of them would fail at spawn time.
-        if (agentPtyRegistry === null) return
-        toolsDisposers = registerTools(ctx, agentPtyRegistry, (sessionId) => sessionCwdOf(ctx, sessionId), () => shellOverridesOf(() => settingsFace))
+        toolsDisposers = registerTools(ctx, agentPtyRegistry, (sessionId) => localWorkspaceCwdOf(ctx, workspaceProviders, sessionId), () => shellOverridesOf(() => settingsFace), async (sessionId, title, command, signal) => {
+          const workspace = await sessionWorkspaceOf(ctx, workspaceProviders, sessionId)
+          signal.throwIfAborted()
+          if (!readPrefs(config).agentTerminalTools) throw new SidebarError('workspace-unavailable', 'Agent terminal tools are disabled', 503)
+          if (workspace.kind === 'remote') return agentPtyRegistry.createRemote(sessionId, title, command, workspace, signal)
+          const overrides = shellOverridesOf(() => settingsFace)
+          return agentPtyRegistry.create(sessionId, title, command, workspace.cwd, 80, 24, overrides.shell, overrides.shellArgs)
+        })
       }
     } else if (toolsDisposers !== null) {
       toolsDisposers()
@@ -802,7 +853,7 @@ export function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): vo
       // The feature is off: release every agent terminal the model created
       // while it was on (they are only reachable through the tools). The
       // registry change fires the push, so the sidebar reconciles them away.
-      agentPtyRegistry?.disposeAll()
+      void agentPtyRegistry.disposeAll().catch(error => ctx.logger?.warn(String(error)))
     }
   }
   ctx.inject(['settings'], (injected) => {
@@ -880,7 +931,7 @@ export function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): vo
           openToolsDisposers = registerOpenTool(
             ctx,
             agentOpenRegistry,
-            (sessionId) => sessionCwdOf(ctx, sessionId),
+            (sessionId) => localWorkspaceCwdOf(ctx, workspaceProviders, sessionId),
             () => {
               const view = settingsFace?.get()
               const value = view?.value
@@ -913,15 +964,12 @@ export function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): vo
   // effect releases the listener on fiber disposal.
   const assistantLive = createAssistantLiveBuffer(ctx)
   ctx.effect(() => () => { assistantLive.dispose() }, 'dsh-better-sidebar: live assistant stream buffer')
-  const api = buildApi(ctx, ptyManager, agentPtyRegistry, resolved, terminalShell, () => settingsFace, assistantLive)
+  const api = buildApi(ctx, ptyManager, agentPtyRegistry, resolved, terminalShell, () => settingsFace, assistantLive, workspaceProviders, remoteTerminals)
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: '/sidebar/api',
     handler: async (req, res) => {
-      if (!fence(req)) {
-        writeJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
-        return
-      }
+      if (rejectSidebarHttp(admission, req, res)) return
       if (req.method !== 'POST') {
         writeJson(res, 405, { ok: false, error: { code: 'method-error', message: 'method not allowed' } })
         return
@@ -932,15 +980,20 @@ export function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): vo
         writeError(res, new SidebarError('not-found', 'unknown sidebar API method', 404))
         return
       }
+      const searchRequest = method === 'fs.search' ? observeSearchRequest(req, res) : undefined
       try {
         const payload = await readJsonBody(req)
+        searchRequest?.signal.throwIfAborted()
         const handler = api[method]
         if (handler === undefined) {
           throw new SidebarError('not-found', `unknown sidebar API method "${method}"`, 404)
         }
-        writeOk(res, await handler(payload))
+        const value = await handler(payload, searchRequest?.signal)
+        if (!searchRequest?.signal.aborted) writeOk(res, value)
       } catch (error) {
-        writeError(res, error)
+        if (!searchRequest?.signal.aborted) writeError(res, error)
+      } finally {
+        searchRequest?.dispose()
       }
     },
   }), 'dsh-better-sidebar: /sidebar/api routes')
@@ -955,10 +1008,7 @@ export function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): vo
     kind: 'exact',
     path: '/sidebar/upload',
     handler: async (req, res) => {
-      if (!fence(req)) {
-        writeJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
-        return
-      }
+      if (rejectSidebarHttp(admission, req, res)) return
       if (req.method !== 'POST') {
         writeJson(res, 405, { ok: false, error: { code: 'method-error', message: 'method not allowed' } })
         return
@@ -971,15 +1021,11 @@ export function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): vo
         if (sessionId === null || dir === null || relativePath === null || relativePath.trim() === '') {
           throw new SidebarError('bad-request', 'sessionId, dir, and relativePath are required')
         }
-        const cwd = await sessionCwdOf(ctx, sessionId, url.searchParams.get('cwd') ?? undefined)
-        const { path, size } = await writeWorkspaceUpload({
-          cwd,
-          dir,
-          relativePath,
-          chunks: req,
-          limit: resolved.uploadLimit,
-          fence: fenceEnabledOf(() => settingsFace),
-        })
+        const workspace = await sessionWorkspaceOf(ctx, workspaceProviders, sessionId)
+        const input = { dir, relativePath, chunks: req, limit: resolved.uploadLimit, fence: fenceEnabledOf(() => settingsFace) }
+        const { path, size } = workspace.kind === 'remote'
+          ? await workspace.fs.upload(input)
+          : await writeWorkspaceUpload({ cwd: workspace.cwd, ...input })
         writeOk(res, { path, size })
       } catch (error) {
         writeError(res, error)
@@ -991,18 +1037,14 @@ export function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): vo
   // Serves the client half's split bundles (lib/client-<name>.js) so the
   // heavy preview/terminal libraries load on first use, not at page start
   // (see bundle-route.ts / src/client/chunk-loader.ts).
-  ctx.effect(() => registerBundleRoute(ctx, fence), 'dsh-better-sidebar: /sidebar/bundle chunk route')
+  ctx.effect(() => registerBundleRoute(ctx, admission), 'dsh-better-sidebar: /sidebar/bundle chunk route')
 
   // ── Media route (images for the editor) ─────────────────────────────────
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: '/sidebar/file',
     handler: async (req, res) => {
-      if (!fence(req)) {
-        res.writeHead(403)
-        res.end('forbidden')
-        return
-      }
+      if (rejectSidebarHttp(admission, req, res)) return
       if (req.method !== 'GET') {
         res.writeHead(405)
         res.end()
@@ -1013,18 +1055,9 @@ export function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): vo
         const sessionId = url.searchParams.get('sessionId')
         const raw = url.searchParams.get('path')
         if (sessionId === null || raw === null) throw new SidebarError('bad-request', 'sessionId and path are required')
-        const cwd = await sessionCwdOf(ctx, sessionId, url.searchParams.get('cwd') ?? undefined)
-        // A native file address spells an in-workspace file RELATIVE to the
-        // session root, so the editor's image / PDF / download viewers send a
-        // workspace-relative path here (see resolveWorkspaceTarget); the fence
-        // still bounds the joined target.
-        const path = await ensureWorkspacePath(cwd, resolveWorkspaceTarget(cwd, raw), fenceEnabledOf(() => settingsFace))
-        const info = await stat(path)
-        if (!info.isFile() || info.size > resolved.mediaLimit) {
-          throw new SidebarError('fs-error', 'not a file or too large', 400)
-        }
+        const workspace = await sessionWorkspaceOf(ctx, workspaceProviders, sessionId)
+        const { path, body } = await readWorkspaceBytes(workspace, raw, resolved.mediaLimit, fenceEnabledOf(() => settingsFace))
         const type = mediaTypeForPath(path)
-        const body = await readFile(path)
         // Raw bytes either way (binary-safe); ?download=1 switches the
         // disposition so the browser saves the file instead of showing it.
         const headers: Record<string, string> = { 'content-type': type, 'cache-control': 'no-cache' }
@@ -1053,11 +1086,7 @@ export function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): vo
     kind: 'prefix',
     path: '/sidebar/html',
     handler: async (req, res) => {
-      if (!fence(req)) {
-        res.writeHead(403)
-        res.end('forbidden')
-        return
-      }
+      if (rejectSidebarHttp(admission, req, res)) return
       if (req.method !== 'GET') {
         res.writeHead(405)
         res.end()
@@ -1071,19 +1100,9 @@ export function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): vo
           return
         }
         const { sessionId, path } = decoded.ref
-        // The session's authoritative cwd (client cwd cannot ride in the URL
-        // — the path encoding has no query; a detached first request falls
-        // back to the process cwd and is normally refused by the workspace
-        // real-path guard, with the same semantics as the media route's
-        // fallback.
-        const cwd = await sessionCwdOf(ctx, sessionId)
-        const absolute = await ensureWorkspacePath(cwd, path, fenceEnabledOf(() => settingsFace))
-        const info = await stat(absolute)
-        if (!info.isFile() || info.size > resolved.mediaLimit) {
-          throw new SidebarError('fs-error', 'not a file or too large', 400)
-        }
+        const workspace = await sessionWorkspaceOf(ctx, workspaceProviders, sessionId)
+        const { path: absolute, body } = await readWorkspaceBytes(workspace, path, resolved.mediaLimit, fenceEnabledOf(() => settingsFace))
         const type = mediaTypeForPath(absolute)
-        const body = await readFile(absolute)
         res.writeHead(200, {
           'content-type': type === 'text/html' ? 'text/html; charset=utf-8' : type,
           'cache-control': 'no-cache',
@@ -1113,14 +1132,11 @@ export function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): vo
   ctx.effect(() => ctx.webServer.registerUpgrade({
     path: '/sidebar/ws/terminal',
     handler: (req, socket, head) => {
-      if (!fence(req)) {
-        socket.destroy()
-        return
-      }
+      if (rejectSidebarUpgrade(admission, req, socket)) return
       // The structural request/socket/head faces satisfy the shared fence;
       // the `ws` package wants the real Node types — cast at this boundary.
       wss.handleUpgrade(req as unknown as IncomingMessage, socket as unknown as Duplex, head as Buffer, (ws) => {
-        void attachTerminal(ctx, ptyManager, agentPtyRegistry, ws, req, resolved, () => settingsFace)
+        void attachTerminal(ctx, ptyManager, agentPtyRegistry, ws, req, resolved, () => settingsFace, workspaceProviders, remoteTerminals)
       })
     },
   }), 'dsh-better-sidebar: terminal WebSocket')
@@ -1137,10 +1153,7 @@ export function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): vo
   ctx.effect(() => ctx.webServer.registerUpgrade({
     path: '/sidebar/ws/agent-terminals',
     handler: (req, socket, head) => {
-      if (!fence(req)) {
-        socket.destroy()
-        return
-      }
+      if (rejectSidebarUpgrade(admission, req, socket)) return
       agentListWss.handleUpgrade(req as unknown as IncomingMessage, socket as unknown as Duplex, head as Buffer, (ws) => {
         void attachAgentList(agentPtyRegistry, ws, req)
       })
@@ -1157,25 +1170,26 @@ export function apply(ctx: Context, config?: SidebarConfig | VolatileConfig): vo
   ctx.effect(() => ctx.webServer.registerUpgrade({
     path: '/sidebar/ws/agent-opens',
     handler: (req, socket, head) => {
-      if (!fence(req)) {
-        socket.destroy()
-        return
-      }
+      if (rejectSidebarUpgrade(admission, req, socket)) return
       agentOpenWss.handleUpgrade(req as unknown as IncomingMessage, socket as unknown as Duplex, head as Buffer, (ws) => {
         void attachAgentOpen(agentOpenRegistry, ws, req)
       })
     },
   }), 'dsh-better-sidebar: agent-opens push WebSocket')
 
-  ctx.effect(() => () => {
+  ctx.effect(() => async () => {
     toolsDisposers?.()
     openToolsDisposers?.()
+    const socketCleanup = [wss, agentListWss, agentOpenWss].map(server => {
+      for (const socket of server.clients) socket.terminate()
+      return new Promise<void>((resolve, reject) => { server.close(error => error ? reject(error) : resolve()) })
+    })
     ptyManager?.disposeAll()
-    agentPtyRegistry?.disposeAll()
+    const cleanup = Promise.allSettled([agentPtyRegistry.dispose(), remoteTerminals.disposeAll(), ...sessionTerminalCleanup, ...socketCleanup])
     agentOpenRegistry.dispose()
-    wss.close()
-    agentListWss.close()
-    agentOpenWss.close()
+    const outcomes = await cleanup
+    const failures = outcomes.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
+    if (failures.length) throw new AggregateError(failures, 'Sidebar terminal teardown failed')
   }, 'dsh-better-sidebar: teardown')
 }
 
@@ -1293,7 +1307,10 @@ async function attachTerminal(
   req: SidebarHttpRequest,
   resolved: ResolvedSidebarConfig,
   getSettings: () => SidebarSettingsFace | undefined,
+  workspaceProviders: SidebarWorkspaceProviders,
+  remoteTerminals: RemoteTerminalRegistry,
 ): Promise<void> {
+  const pending = captureTerminalInput(ws, resolved.terminalInputBufferBytes)
   try {
     const url = new URL(req.url ?? '/', 'http://dsh.internal')
     const uuid = url.searchParams.get('uuid')
@@ -1304,12 +1321,19 @@ async function attachTerminal(
         ws.close(1011, `agent terminal "${uuid}" not found`)
         return
       }
-      const handle = agentPtyRegistry.get(uuid)
+      const ownerSessionId = url.searchParams.get('sessionId')
+      if (ownerSessionId === null) throw new SidebarError('bad-request', 'sessionId is required for agent terminal attachment')
+      await sessionWorkspaceOf(ctx, workspaceProviders, ownerSessionId)
+      const handle = agentPtyRegistry.assertOwned(uuid, ownerSessionId)
       if (handle === undefined) {
         ws.close(1011, `agent terminal "${uuid}" not found`)
         return
       }
-      pumpAgentTerminal(agentPtyRegistry, handle, ws)
+      if (pending.closeRequested) { await agentPtyRegistry.close(uuid); return }
+      if (pending.overflow || ws.readyState !== WebSocket.OPEN) return
+      if (handle.pty instanceof RemoteTerminalHandle) {
+        pumpRemoteTerminal(handle.pty, ws, () => agentPtyRegistry.close(uuid), pending.drain(), resolved.terminalInputBufferBytes, handle)
+      } else pumpAgentTerminal(agentPtyRegistry, handle, ws, pending.drain())
       return
     }
     const sessionId = url.searchParams.get('sessionId')
@@ -1318,6 +1342,21 @@ async function attachTerminal(
       ws.close(1008, 'either ?uuid or ?sessionId+?tab are required')
       return
     }
+    const workspace = await sessionWorkspaceOf(ctx, workspaceProviders, sessionId)
+    const key = JSON.stringify([sessionId, tabId])
+    if (pending.closeRequested) { await remoteTerminals.close(key); ptyManager?.close(`${sessionId}:${tabId}`); return }
+    if (pending.overflow || ws.readyState !== WebSocket.OPEN) return
+    if (workspace.kind === 'remote') {
+      ptyManager?.close(`${sessionId}:${tabId}`)
+      const handle = await remoteTerminals.open(key, sessionId, workspace)
+      if (pending.closeRequested) { await remoteTerminals.close(key); return }
+      if (pending.overflow || ws.readyState !== WebSocket.OPEN) return
+      pumpRemoteTerminal(handle, ws, () => remoteTerminals.close(key), pending.drain(), resolved.terminalInputBufferBytes)
+      return
+    }
+    await remoteTerminals.close(key)
+    if (pending.closeRequested) { ptyManager?.close(`${sessionId}:${tabId}`); return }
+    if (pending.overflow || ws.readyState !== WebSocket.OPEN) return
     if (ptyManager === null) {
       // Degraded mode (issue #140): node-pty unavailable. The close reason
       // is a SHORT marker — a WS close reason is capped at 123 bytes, so the
@@ -1325,7 +1364,7 @@ async function attachTerminal(
       ws.close(1011, PTY_DEPS_MISSING)
       return
     }
-    const cwd = await sessionCwdOf(ctx, sessionId, url.searchParams.get('cwd') ?? undefined)
+    const cwd = workspace.cwd
     // Settings-page shell overrides win over the yaml/auto shell for
     // terminals opened from now on (existing pty handles keep their shell).
     const overrides = shellOverridesOf(getSettings)
@@ -1345,8 +1384,7 @@ async function attachTerminal(
     }
     const dataSub = handle.pty.onData(onData)
     const exitSub = handle.pty.onExit(onExit)
-    ws.on('message', (data) => {
-      const text = data.toString('utf8')
+    const receiveInput = (text: string): void => {
       // Control frames are JSON with a known shape; anything else (including
       // JSON that is not a recognized control) is terminal input, verbatim.
       let control: { type?: unknown; cols?: unknown; rows?: unknown } | null = null
@@ -1383,7 +1421,8 @@ async function attachTerminal(
       } else {
         handle.pty.write(text)
       }
-    })
+    }
+    ws.on('message', data => receiveInput(terminalInputText(data)))
     ws.on('close', () => {
       dataSub.dispose()
       exitSub.dispose()
@@ -1396,9 +1435,10 @@ async function attachTerminal(
         ptyManager.scheduleClose(handle.key, resolved.reconnectGraceMs)
       }
     })
+    for (const text of pending.drain()) receiveInput(text)
   } catch (error) {
     ws.close(1011, wsCloseReasonOf(error))
-  }
+  } finally { pending.dispose() }
 }
 
 /**
@@ -1408,11 +1448,63 @@ async function attachTerminal(
  * the lifetime, and only `terminal_close`, a `{type:'close'}` frame, or
  * plugin teardown kills it.
  */
+/** A browser attachment never owns a remote backend; only explicit close releases it. */
+function pumpRemoteTerminal(handle: RemoteTerminalHandle, ws: WebSocket, close: () => void | boolean | Promise<void | boolean>, initialInput: readonly string[], maxInputBytes: number, agent?: AgentTerminalHandle): void {
+  const send = (data: string): void => {
+    if (ws.readyState !== WebSocket.OPEN) return
+    if (ws.bufferedAmount >= 4 * 1024 * 1024) { ws.close(1011, 'Terminal view cannot keep up; reconnect to replay'); return }
+    ws.send(data)
+  }
+  const report = (error: unknown): void => { if (ws.readyState === WebSocket.OPEN) ws.close(1011, wsCloseReasonOf(error)) }
+  const dataSub = handle.onData(send)
+  const exitSub = handle.onExit(({ exitCode }) => {
+    if (handle.failure) report(handle.failure)
+    else send(`\r\n[process exited with code ${exitCode}]\r\n`)
+  })
+  // Subscription and replay execute synchronously, so no output can fall between them.
+  send(handle.transcript)
+  if (handle.failure) report(handle.failure)
+  let input = Promise.resolve()
+  let inputBytes = 0
+  let detached = false
+  const receiveInput = (text: string): void => {
+    let control: { type?: unknown; cols?: unknown; rows?: unknown } | null = null
+    try {
+      const parsed: unknown = JSON.parse(text)
+      if (parsed !== null && typeof parsed === 'object') control = parsed as { type?: unknown; cols?: unknown; rows?: unknown }
+    } catch (_error) { /* Ordinary terminal text is not JSON. */ }
+    if (control?.type === 'park') return
+    if (control?.type === 'close') {
+      detached = true
+      void Promise.resolve(close()).catch(report)
+      return
+    }
+    const bytes = Buffer.byteLength(text)
+    if (bytes > maxInputBytes - inputBytes) { detached = true; ws.close(1009, 'Terminal input queue limit reached'); return }
+    inputBytes += bytes
+    input = input.then(async () => {
+      if (detached || handle.exited) return
+      if (control?.type === 'resize' && typeof control.cols === 'number' && typeof control.rows === 'number') {
+        if (!Number.isFinite(control.cols) || !Number.isFinite(control.rows)) throw new SidebarError('bad-request', 'Invalid terminal geometry')
+        const dims = clampDims(control.cols, control.rows)
+        await handle.resize(dims.cols, dims.rows)
+      } else await handle.write(text)
+    }).catch(error => { detached = true; report(error) }).finally(() => { inputBytes -= bytes })
+  }
+  ws.on('message', data => receiveInput(terminalInputText(data)))
+  ws.on('close', () => { detached = true; dataSub.dispose(); exitSub.dispose() })
+  for (const text of initialInput) receiveInput(text)
+  if (agent) agent.transcript = handle.transcript
+}
+
 function pumpAgentTerminal(
   registry: AgentPtyRegistry,
   handle: AgentTerminalHandle,
   ws: WebSocket,
+  initialInput: readonly string[],
 ): void {
+  if (handle.pty instanceof RemoteTerminalHandle) throw new Error('Remote terminal requires its acknowledged pump')
+  const nativePty = handle.pty
   if (handle.transcript !== '') ws.send(handle.transcript)
   const onData = (data: string): void => {
     if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount < 4 * 1024 * 1024) {
@@ -1422,11 +1514,10 @@ function pumpAgentTerminal(
   const onExit = ({ exitCode }: { exitCode: number; signal?: number }): void => {
     onData(`\r\n[process exited with code ${String(exitCode)}]\r\n`)
   }
-  const dataSub = handle.pty.onData(onData)
-  const exitSub = handle.pty.onExit(onExit)
-  ws.on('message', (data) => {
+  const dataSub = nativePty.onData(onData)
+  const exitSub = nativePty.onExit(onExit)
+  const receiveInput = (text: string): void => {
     if (handle.exited) return
-    const text = data.toString('utf8')
     let control: { type?: unknown; cols?: unknown; rows?: unknown } | null = null
     try {
       const parsed: unknown = JSON.parse(text)
@@ -1447,17 +1538,18 @@ function pumpAgentTerminal(
       && control.type === 'resize'
       && typeof control.cols === 'number' && typeof control.rows === 'number'
     ) {
-      tryResizePty(handle.pty, control.cols, control.rows)
+      tryResizePty(nativePty, control.cols, control.rows)
     } else if (control === null) {
       // Raw text input (a JSON-looking string the pty would have received
       // verbatim is reachable in theory but is exotic for an agent terminal;
       // preserve the UI-tab semantics and forward as input).
-      handle.pty.write(text)
+      nativePty.write(text)
     }
     // An unrecognized JSON control frame is dropped (the UI-tab path also
     // treats non-resize JSON controls as input, but for an agent terminal
     // there is no realistic input that is also valid JSON).
-  })
+  }
+  ws.on('message', data => receiveInput(terminalInputText(data)))
   ws.on('close', () => {
     dataSub.dispose()
     exitSub.dispose()
@@ -1466,4 +1558,5 @@ function pumpAgentTerminal(
     // frame, or plugin teardown kills it. A reconnecting view reattaches the
     // same shell and gets the full transcript replayed.
   })
+  for (const text of initialInput) receiveInput(text)
 }

@@ -93,7 +93,7 @@ export function usePinnedTabs(input: {
         return leaf === undefined ? s : closeTab(s, leaf.id, originalId)
       })
       if (isAgentTabId(originalId)) {
-        void api.agentPtyClose(agentUuidOf(originalId)).catch(() => { /* already released */ })
+        void api.agentPtyClose({ sessionId: homeSessionId }, agentUuidOf(originalId)).catch(() => { /* already released */ })
       } else {
         void api.ptyClose({ sessionId: homeSessionId, ...(homeCwd !== undefined ? { cwd: homeCwd } : {}) }, originalId).catch(() => { /* already released */ })
       }

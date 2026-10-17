@@ -13,14 +13,9 @@ import { resolveSidebarPath, selectProducedFiles } from './produced-files.ts'
 import css from './sidebar.module.css'
 
 /** Open a file in the sidebar's editor (used by the intercepted row and the explorer). */
-export function openSidebarFile(ctx: Context, store: SidebarStore, sessionId: string, path: string): void {
-  const summary = ctx.sessions.list.getSnapshot().byId[sessionId]
-  const absolute = resolveSidebarPath(summary?.cwd, path)
-  const at = Math.max(absolute.lastIndexOf('/'), absolute.lastIndexOf('\\'))
-  const title = at === -1 ? absolute : absolute.slice(at + 1)
-  // Route through the sidebar service so the editor descriptor's dedupeKey
-  // (per-path) applies; the id is path-derived so multiple editors coexist.
-  ctx.get('betterSidebar')?.openTab({ type: 'editor', title, path: absolute, id: `editor:${absolute}` })
+export function openSidebarFile(ctx: Context, _store: SidebarStore, sessionId: string, path: string): void {
+  const cwd = ctx.sessions.list.getSnapshot().byId[sessionId]?.cwd
+  ctx.get('betterSidebar')?.openFile({ sessionId, cwd }, resolveSidebarPath(cwd, path))
 }
 
 /**
@@ -42,12 +37,12 @@ export function revealInExplorer(
   const targets = files.length > 0
     ? files.map(path => resolveSidebarPath(cwd, path))
     : cwd === undefined ? [] : [cwd]
-  store.reduce(state => revealPaths(state, cwd, targets))
+  store.reduceFor(sessionId, state => revealPaths(state, cwd, targets))
   // Focus the single-instance editor home tab (the files window) where the
   // reveal highlight renders. Read via ctx.get like every other internal
   // consumer (#357): the provider is not on this fiber chain, so a direct
   // ctx.betterSidebar read can throw before optional chaining applies.
-  ctx.get('betterSidebar')?.openTab({ type: 'editor', title: t('files') })
+  ctx.get('betterSidebar')?.openTab({ type: 'editor', title: t('files') }, { sessionId, cwd })
 }
 
 /** The turn-tail owner currency the slot supplies (structural mirror). */

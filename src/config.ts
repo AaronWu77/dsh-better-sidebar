@@ -48,11 +48,13 @@ export interface SidebarHostConfig {
   listLimit?: number
   /** Terminals per session. */
   terminalsPerSession?: number
+  /** Pending wire input per terminal attachment, including asynchronous backend startup (bytes). */
+  terminalInputBufferBytes?: number
   /** How long a disconnected terminal process survives awaiting a reconnect. */
   reconnectGraceMs?: number
   /**
-   * Terminal shell (absolute path or bare executable name) for BOTH the UI
-   * terminal tabs and the model-facing `terminal_*` tools. Empty = auto:
+   * Local terminal shell for UI tabs and model `terminal_*` tools.
+   * Remote shell argv/env are provider-owned. Empty local shell = auto:
    * POSIX follows `$SHELL` then the account login shell; Windows follows
    * `DSH_SIDEBAR_SHELL`, then probes for `pwsh.exe`, then falls back to the
    * inbox `powershell.exe` (5.1). Set it from `cordis.patch.yml` / profile
@@ -89,6 +91,7 @@ export interface ResolvedSidebarConfig {
   uploadLimit: number
   listLimit: number
   terminalsPerSession: number
+  terminalInputBufferBytes: number
   reconnectGraceMs: number
   /** The configured terminal shell; empty means the host auto-resolves it. */
   shell: string
@@ -103,12 +106,15 @@ export interface ResolvedSidebarConfig {
  * @returns Complete settings consumed by the host half.
  */
 export function resolveSidebarConfig(config: SidebarHostConfig | undefined): ResolvedSidebarConfig {
+  const terminalInputBufferBytes = config?.terminalInputBufferBytes ?? 256 * 1024
+  if (!Number.isSafeInteger(terminalInputBufferBytes) || terminalInputBufferBytes <= 0) throw new Error('terminalInputBufferBytes must be a positive safe integer')
   return {
     readLimit: config?.readLimit ?? 512 * 1024,
     mediaLimit: config?.mediaLimit ?? 20 * 1024 * 1024,
     uploadLimit: config?.uploadLimit ?? 128 * 1024 * 1024,
     listLimit: config?.listLimit ?? 1000,
     terminalsPerSession: config?.terminalsPerSession ?? 3,
+    terminalInputBufferBytes,
     reconnectGraceMs: config?.reconnectGraceMs ?? 30_000,
     shell: config?.shell?.trim() ?? '',
     shellArgs: config?.shellArgs ?? [],
@@ -191,6 +197,7 @@ export const Config: z<SidebarConfig, VolatileConfig> = z.object({
   uploadLimit: z.number().step(1).min(1).default(128 * 1024 * 1024),
   listLimit: z.number().step(1).min(1).default(1000),
   terminalsPerSession: z.number().step(1).min(1).default(3),
+  terminalInputBufferBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(256 * 1024),
   reconnectGraceMs: z.number().step(1).min(0).default(30_000),
   shell: z.string().default(''),
   shellArgs: z.array(z.string()).default([]),

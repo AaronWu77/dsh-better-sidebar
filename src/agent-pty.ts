@@ -16,9 +16,8 @@ import type { IPty } from 'node-pty'
 import { ensureSpawnHelper, resolveShellExecutable, shellSpawnArgs } from './pty-manager.ts'
 import { loadRequiredNodePty, type NodePtyModule } from './pty-deps.ts'
 import { SidebarError } from './wire.ts'
-
-/** Per-agent-terminal transcript bound (bytes kept for replay and reads). */
-const TRANSCRIPT_LIMIT = 1 << 20
+import { RemoteTerminalHandle, RemoteTerminalRegistry, TERMINAL_TRANSCRIPT_LIMIT as TRANSCRIPT_LIMIT } from './remote-terminal-registry.ts'
+import type { SidebarRemoteWorkspace } from './workspace-provider.ts'
 
 /** POSIX signals the registry forwards to a live pty. */
 export const ALLOWED_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGKILL', 'SIGHUP', 'SIGTSTP'] as const
@@ -151,8 +150,9 @@ const SIGNAL_NAMES: Record<number, string> = {
 }
 
 /** Convert a raw signal number to a name (or null when absent/unknown). */
-function signalNameOf(signal: number | null | undefined): string | null {
+function signalNameOf(signal: number | string | null | undefined): string | null {
   if (signal === null || signal === undefined) return null
+  if (typeof signal === 'string') return signal
   return SIGNAL_NAMES[signal] ?? `signal ${signal}`
 }
 
@@ -221,7 +221,7 @@ export interface AgentTerminalHandle {
   /** The working directory the process was spawned with. */
   cwd: string
   /** The live pty process. */
-  pty: IPty
+  pty: IPty | RemoteTerminalHandle
   /** Output accumulated since spawn (bounded; head dropped when over the limit). */
   transcript: string
   /** Whether the top-level process exited (transcript stays replayable). */
@@ -229,7 +229,7 @@ export interface AgentTerminalHandle {
   /** Exit code once known. */
   exitCode?: number | null
   /** Exit signal number once known (POSIX only; undefined on Windows). */
-  exitSignal?: number | null
+  exitSignal?: number | string | null
   /** Active wait_for registrations (skip bookkeeping; empty while idle). */
   waits: AgentTerminalActiveWait[]
 }
@@ -328,12 +328,15 @@ export function snapshotOf(handle: AgentTerminalHandle): AgentTerminalSnapshot {
 export class AgentPtyRegistry {
   private readonly sessions = new Map<string, AgentTerminalHandle>()
   private readonly changeListeners = new Set<() => void>()
+  private readonly remote = new RemoteTerminalRegistry(Number.MAX_SAFE_INTEGER)
+  private disposed = false
+  private readonly remoteCreates = new Map<AbortController, { sessionId: string; result: Promise<string> }>()
 
   constructor(
     private readonly shell: string,
     private readonly shellArgs: string[] = [],
     /** The loaded node-pty module (injected so a broken install degrades instead of crashing the plugin). */
-    private readonly nodePty: NodePtyModule = loadRequiredNodePty(),
+    private readonly nodePty: NodePtyModule | null = loadRequiredNodePty(),
   ) {
     ensureSpawnHelper()
   }
@@ -356,6 +359,8 @@ export class AgentPtyRegistry {
     shell?: string,
     shellArgs?: string[],
   ): string {
+    if (this.disposed) throw new SidebarError('workspace-unavailable', 'Terminal registry is disposed', 503)
+    if (this.nodePty === null) throw new SidebarError('workspace-unavailable', 'Local terminal requires node-pty; remote terminals remain available', 503)
     const uuid = randomUUID()
     const dims = clampDims(cols, rows)
     const executable = resolveShellExecutable(shell ?? this.shell)
@@ -409,6 +414,61 @@ export class AgentPtyRegistry {
     return uuid
   }
 
+  /** Create a model terminal on the already-selected remote host and acknowledge its initial input.
+   * @param sessionId Owning session.
+   * @param title Browser tab title.
+   * @param command Initial command, submitted once.
+   * @param workspace Authoritative remote workspace.
+   * @param signal Caller cancellation during allocation.
+   * @returns The allocated terminal UUID.
+   */
+  createRemote(sessionId: string, title: string, command: string, workspace: SidebarRemoteWorkspace, signal?: AbortSignal): Promise<string> {
+    const controller = new AbortController()
+    const forwardAbort = () => { controller.abort(signal?.reason) }
+    if (signal?.aborted) forwardAbort()
+    else signal?.addEventListener('abort', forwardAbort, { once: true })
+    const result = Promise.resolve().then(() => this.allocateRemote(sessionId, title, command, workspace, controller.signal))
+    this.remoteCreates.set(controller, { sessionId, result })
+    const finished = () => { this.remoteCreates.delete(controller); signal?.removeEventListener('abort', forwardAbort) }
+    void result.then(finished, finished)
+    return result
+  }
+
+  private async allocateRemote(sessionId: string, title: string, command: string, workspace: SidebarRemoteWorkspace, signal: AbortSignal): Promise<string> {
+    if (this.disposed) throw new SidebarError('workspace-unavailable', 'Terminal registry is disposed', 503)
+    signal?.throwIfAborted()
+    const uuid = randomUUID()
+    const abort = () => { void this.remote.close(uuid).catch((_error) => { /* The create call awaits cleanup below. */ }) }
+    const creation = this.remote.open(uuid, sessionId, workspace)
+    signal?.addEventListener('abort', abort, { once: true })
+    try {
+      const pty = await creation
+      signal?.throwIfAborted()
+      if (this.disposed) throw new SidebarError('workspace-unavailable', 'Terminal registry is disposed', 503)
+      const handle: AgentTerminalHandle = { uuid, sessionId, title, command, cwd: workspace.cwd, pty, transcript: pty.transcript, exited: pty.exited, waits: [] }
+      pty.onData(() => { handle.transcript = pty.transcript })
+      pty.onExit(() => {
+        handle.exited = true
+        handle.exitCode = pty.exitCode
+        handle.exitSignal = pty.exitSignal
+        this.notify()
+      })
+      this.sessions.set(uuid, handle)
+      if (command !== '') await pty.write(`${command}\r`)
+      signal?.throwIfAborted()
+      if (this.disposed) throw new SidebarError('workspace-unavailable', 'Terminal registry is disposed', 503)
+      if (pty.isClosing || pty.exited) throw new SidebarError('workspace-unavailable', 'Remote terminal closed during initial input', 503)
+      this.notify()
+      return uuid
+    } catch (error) {
+      this.sessions.delete(uuid)
+      await this.remote.close(uuid)
+      throw error
+    } finally {
+      signal?.removeEventListener('abort', abort)
+    }
+  }
+
   /** All live agent terminals belonging to one conversation. */
   list(sessionId: string): AgentTerminalSnapshot[] {
     const out: AgentTerminalSnapshot[] = []
@@ -448,12 +508,12 @@ export class AgentPtyRegistry {
   }
 
   /** Write raw text to a terminal's stdin (tmux `send-keys` semantics). */
-  send(uuid: string, text: string): void {
+  send(uuid: string, text: string): void | Promise<void> {
     const handle = this.expect(uuid)
     if (handle.exited) {
       throw new SidebarError('bad-request', `agent terminal "${uuid}" has exited`, 400)
     }
-    handle.pty.write(text)
+    return handle.pty.write(text)
   }
 
   /**
@@ -492,13 +552,14 @@ export class AgentPtyRegistry {
    * @returns the dimensions actually applied (the caller echoes these, so the
    * reported value always matches the pty).
    */
-  resize(uuid: string, cols: number, rows: number): { cols: number; rows: number } {
+  resize(uuid: string, cols: number, rows: number): { cols: number; rows: number } | Promise<{ cols: number; rows: number }> {
     const handle = this.expect(uuid)
     const dims = clampDims(cols, rows)
     // Through tryResizePty: node-pty throws on a just-exited pty (the exit
     // event may not have flipped `handle.exited` yet), and on Windows a
     // pre-ready resize must go through the gate instead of node-pty's own
     // deferred queue (which flushes uncatchably inside its socket handler).
+    if (!handle.exited && handle.pty instanceof RemoteTerminalHandle) return handle.pty.resize(dims.cols, dims.rows).then(() => dims)
     if (!handle.exited) tryResizePty(handle.pty, dims.cols, dims.rows)
     return dims
   }
@@ -640,9 +701,13 @@ export class AgentPtyRegistry {
    *   `kill(2)`, Windows `TerminateProcess`). These cannot be faked with
    *   control characters.
    */
-  signal(uuid: string, signal: AgentTerminalSignal): void {
+  signal(uuid: string, signal: AgentTerminalSignal): void | Promise<void> {
     const handle = this.expect(uuid)
     if (handle.exited) return
+    if (handle.pty instanceof RemoteTerminalHandle) {
+      if (signal === 'SIGINT' || signal === 'SIGTSTP') return handle.pty.write(signal === 'SIGINT' ? '\x03' : '\x1a')
+      return handle.pty.kill()
+    }
     // Ctrl+C → 0x03 (ETX), Ctrl+Z → 0x1A (SUB). Writing these to the pty
     // master is the cross-platform way to deliver the signal to the
     // foreground process group through the terminal's input pipeline.
@@ -676,9 +741,16 @@ export class AgentPtyRegistry {
    * same uuid is a no-op. Returns true iff a live handle was actually
    * dropped.
    */
-  close(uuid: string): boolean {
+  close(uuid: string): boolean | Promise<boolean> {
     const handle = this.sessions.get(uuid)
     if (handle === undefined) return false
+    if (handle.pty instanceof RemoteTerminalHandle) {
+      return this.remote.close(uuid).then(() => {
+        this.sessions.delete(uuid)
+        this.notify()
+        return true
+      })
+    }
     this.sessions.delete(uuid)
     try {
       handle.pty.kill()
@@ -705,8 +777,36 @@ export class AgentPtyRegistry {
   }
 
   /** Close every agent terminal (plugin teardown). */
-  disposeAll(): void {
-    for (const uuid of [...this.sessions.keys()]) this.close(uuid)
+  async disposeAll(): Promise<void> {
+    const pending = [...this.remoteCreates]
+    for (const [controller] of pending) controller.abort(new Error('Agent terminal allocation closed'))
+    const results = await Promise.allSettled([
+      ...[...this.sessions.keys()].map(uuid => this.close(uuid)),
+      this.remote.closeAll(),
+      ...pending.map(([, entry]) => entry.result.then(() => {}, () => { /* Cancellation is reported to create's caller; remote close reports cleanup errors. */ })),
+    ])
+    const failures = results.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
+    if (failures.length) throw new AggregateError(failures, 'Agent terminal cleanup failed')
+  }
+
+  /** Close resident and pending terminals for a removed session. */
+  async closeSession(sessionId: string): Promise<void> {
+    const pending = [...this.remoteCreates].filter(([, entry]) => entry.sessionId === sessionId)
+    for (const [controller] of pending) controller.abort(new Error('Session agent terminal allocation closed'))
+    const results = await Promise.allSettled([
+      ...this.list(sessionId).map(handle => this.close(handle.uuid)),
+      this.remote.closeSession(sessionId),
+      ...pending.map(([, entry]) => entry.result.then(() => {}, () => { /* Create owns the cancellation result; remote close owns cleanup failures. */ })),
+    ])
+    const failures = results.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
+    if (failures.length) throw new AggregateError(failures, 'Session agent terminal cleanup failed')
+  }
+
+  /** Refuse future allocations before plugin teardown starts. */
+  async dispose(): Promise<void> {
+    this.disposed = true
+    this.changeListeners.clear()
+    await this.disposeAll()
   }
 
   /** Fire every change listener (callers wrap in try/catch if needed). */

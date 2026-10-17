@@ -4,6 +4,7 @@
  * actual repository, and a real directory listing. Runs with `pnpm test`.
  */
 import { describe, expect, it, vi } from 'vitest'
+import { authenticatedHostService } from './authenticated-host-fixture.ts'
 import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -47,7 +48,7 @@ interface FakeContext {
    *  callback must never run (mirror of cordis' service-less inject). */
   inject: (deps: readonly string[], callback: (sctx: never) => void) => () => void
   /** Optional services (jobs/agents) are read lazily; absent → undefined. */
-  get: (key: string) => undefined
+  get: typeof authenticatedHostService
 }
 
 /**
@@ -105,9 +106,9 @@ describe('host plugin smoke', () => {
       inject: () => () => {},
       on: () => () => {},
       // No jobs/agents services: the jobs routes degrade to a 503.
-      get: () => undefined,
+      get: authenticatedHostService,
     }
-    apply(ctx as never)
+    apply({ ...ctx, provide: () => () => {} } as never)
     expect(routes.map(route => route.path)).toEqual([
       '/sidebar/api',
       '/sidebar/upload',
@@ -141,10 +142,10 @@ describe('host plugin smoke', () => {
       },
       inject: () => () => {},
       on: () => () => {},
-      get: () => undefined,
+      get: authenticatedHostService,
     }
     try {
-      apply(ctx as never)
+      apply({ ...ctx, provide: () => () => {} } as never)
       const route = routes.find(candidate => candidate.path === '/sidebar/html')!
       const req = {
         method: 'GET',
@@ -517,9 +518,9 @@ describe('session cwd resolution over the API route', () => {
       // The session/agent event feeds: nothing emits in these tests.
       on: () => () => {},
       // No jobs/agents services in the smoke context: the routes degrade.
-      get: (key: string) => key === 'sessionPersistence' ? overrides.sessionPersistence : undefined,
+      get: (key: string) => key === 'sessionPersistence' ? overrides.sessionPersistence : authenticatedHostService(key),
     }
-    apply(ctx as never)
+    apply({ ...ctx, provide: () => () => {} } as never)
     return routes
   }
 
@@ -557,20 +558,19 @@ describe('session cwd resolution over the API route', () => {
     return out
   }
 
-  it('uses the client summary cwd while the session is detached', async () => {
+  it('refuses a browser summary cwd for an unavailable session', async () => {
     const route = mount()
     const result = await invoke(route, 'session.cwd', { sessionId: 's-detached', cwd: '/tmp/summary-cwd' })
-    expect(result.ok).toBe(true)
-    // The summary cwd passes through requireAbsolute (platform resolve), so
-    // the expectation follows the platform's own normalization.
-    expect(result.value?.cwd).toBe(resolvePath('/tmp/summary-cwd'))
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(404)
+    expect(result.error?.code).toBe('not-found')
   })
 
-  it('falls back to the process cwd with no summary cwd', async () => {
+  it('refuses an unknown session rather than using the host process cwd', async () => {
     const route = mount()
     const result = await invoke(route, 'session.cwd', { sessionId: 's-unknown' })
-    expect(result.ok).toBe(true)
-    expect(result.value?.cwd).toBe(process.cwd())
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(404)
   })
 
   it('resolves a cold (detached) session cwd through the persistence index', async () => {
@@ -606,18 +606,18 @@ describe('session cwd resolution over the API route', () => {
     })
     const result = await invoke(route, 'session.cwd', { sessionId: 's-bad' })
     expect(result.ok).toBe(false)
-    expect(result.error?.message).toMatch(/invalid working directory/)
+    expect(result.error?.message).toMatch(/authoritative working directory/)
   })
 
-  it('falls back to the process cwd when persistence has no cwd for the session', async () => {
+  it('refuses a persisted session with no authoritative cwd', async () => {
     const route = mount({
       sessionPersistence: {
         open: async () => ({ header: {}, read: async () => ({ events: [] }), close: async () => {} }),
       },
     })
     const result = await invoke(route, 'session.cwd', { sessionId: 's-blank' })
-    expect(result.ok).toBe(true)
-    expect(result.value?.cwd).toBe(process.cwd())
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(400)
   })
 
   it('prefers the attached session header over the client summary', async () => {
@@ -631,11 +631,11 @@ describe('session cwd resolution over the API route', () => {
     expect(result.value?.cwd).toBe('/attached-cwd')
   })
 
-  it('rejects a non-absolute client cwd', async () => {
-    const route = mount()
-    const result = await invoke(route, 'session.cwd', { sessionId: 's-detached', cwd: 'relative/path' })
-    expect(result.ok).toBe(false)
-    expect(result.error?.message).toMatch(/invalid working directory/)
+  it('ignores a malformed browser cwd when an authoritative session exists', async () => {
+    const route = mount({ sessions: { get: () => ({ header: { cwd: '/authority' } }) } })
+    const result = await invoke(route, 'session.cwd', { sessionId: 's-attached', cwd: 'relative/path' })
+    expect(result.ok).toBe(true)
+    expect(result.value?.cwd).toBe('/authority')
   })
 
   it('pty.close releases a terminal key (and rejects a missing tab)', async () => {
@@ -872,7 +872,7 @@ describe('side card settings routes', () => {
     }
   }
 
-  const mountWithSettings = (settings?: unknown): SidebarWebRoute => {
+  const mountWithSettings = (settings?: unknown, sessionCwd?: string): SidebarWebRoute => {
     const routes: SidebarWebRoute[] = []
     const ctx = {
       webRuntime: { trustedHosts: [] },
@@ -880,7 +880,7 @@ describe('side card settings routes', () => {
         register: (route: SidebarWebRoute) => { routes.push(route); return () => {} },
         registerUpgrade: (route: SidebarWebUpgradeRoute) => { void route; return () => {} },
       },
-      sessions: { get: () => undefined },
+      sessions: { get: () => sessionCwd === undefined ? undefined : { header: { cwd: sessionCwd }, snapshotEvents: () => [] } },
       tools: { register: () => () => {} },
       effect: (fn: () => void | (() => void)) => { fn() },
       inject: (deps: string[], callback: (sctx: { settings: unknown }) => void) => {
@@ -890,9 +890,9 @@ describe('side card settings routes', () => {
       // The session/agent event feeds: nothing emits in these tests.
       on: () => () => {},
       // No jobs/agents services: the jobs routes degrade to a 503.
-      get: () => undefined,
+      get: authenticatedHostService,
     }
-    apply(ctx as never)
+    apply({ ...ctx, provide: () => () => {} } as never)
     return routes.find(route => route.path === '/sidebar/api')!
   }
 
@@ -1039,7 +1039,7 @@ describe('side card settings routes', () => {
     mkdirSync(outside)
     writeFileSync(join(outside, 'secret.txt'), 'global instructions')
     try {
-      const route = mountWithSettings(createFakeSettings())
+      const route = mountWithSettings(createFakeSettings(), workspace)
       // Default (fence on): the outside read is refused as usual…
       const refused = await invoke(route, 'fs.read', { sessionId: 'fence', cwd: workspace, path: join(outside, 'secret.txt') })
       expect(refused).toMatchObject({ ok: false, error: { code: 'forbidden' } })
@@ -1181,9 +1181,9 @@ describe('agent terminal tool gating', () => {
         return () => {}
       },
       // No jobs/agents services: the jobs routes degrade to a 503.
-      get: () => undefined,
+      get: authenticatedHostService,
     }
-    apply(ctx as never, config as never)
+    apply({ ...ctx, provide: () => () => {} } as never, config as never)
     // Default off: no tools are registered even though the settings service is mounted.
     expect(live()).toBe(0)
     // Flipping the setting on registers all eight tools.
@@ -1239,9 +1239,9 @@ describe('agent sidebar-open tool gating', () => {
         if (event === 'settings/document-updated') listenerRef.current = listener
         return () => {}
       },
-      get: () => undefined,
+      get: authenticatedHostService,
     }
-    apply(ctx as never, config as never)
+    apply({ ...ctx, provide: () => () => {} } as never, config as never)
     // Default off: no open tool is registered even though the settings service is mounted.
     expect(live()).toBe(0)
     // Flipping the setting on registers the single sidebar_open tool.

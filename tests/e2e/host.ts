@@ -36,7 +36,7 @@ export function pageUrl(extra: Record<string, string>): string {
   return pageUrlWith(RAW_URL, extra)
 }
 
-/** Absolute URL for the plugin's own (public, unauthenticated) API route. */
+/** Absolute URL for the plugin's authenticated browser API route. */
 export function sidebarApi(path: string): string {
   return `${ORIGIN}/sidebar/api/${path}`
 }

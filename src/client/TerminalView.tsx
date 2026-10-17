@@ -218,7 +218,7 @@ export function TerminalView(props: { scope: SessionScope; tabId: string; store:
       // pty registry); UI-tab terminals attach by sessionId+tab (the host
       // uses the UI-tab pty manager). Same upgrade endpoint, different query.
       if (isAgentTabId(tabId)) {
-        url.search = new URLSearchParams({ uuid: agentUuidOf(tabId) }).toString()
+        url.search = new URLSearchParams({ uuid: agentUuidOf(tabId), sessionId: scope.sessionId }).toString()
       } else {
         const params = new URLSearchParams({ sessionId: scope.sessionId, tab: tabId })
         if (scope.cwd !== undefined && scope.cwd !== '') params.set('cwd', scope.cwd)
@@ -411,7 +411,7 @@ export function TerminalView(props: { scope: SessionScope; tabId: string; store:
       {agentUuid !== null && waiting !== undefined && (
         <TerminalWaitBanner
           needle={waiting.needle}
-          onSkip={() => { void api.agentSkipWait(agentUuid).catch(() => { /* 跳过失败时 banner 留存，可重试 */ }) }}
+          onSkip={() => { void api.agentSkipWait(scope, agentUuid).catch(() => { /* 跳过失败时 banner 留存，可重试 */ }) }}
         />
       )}
       {depsFatal !== null && (

@@ -119,6 +119,27 @@ export function GitLens(props: GitLensProps) {
   /** Whether the history was fully paged (a batch shorter than LOG_BATCH). */
   const [logEnded, setLogEnded] = useState(false)
   const [logLoadingMore, setLogLoadingMore] = useState(false)
+  const [sessionWorkspace, setSessionWorkspace] = useState<{
+    sessionId: string; scopeCwd: string | undefined; cwd: string; signal: AbortSignal
+  } | null>(null)
+
+  useEffect(() => {
+    const sessionId = scope.sessionId
+    const scopeCwd = scope.cwd
+    const controller = new AbortController()
+    setSessionWorkspace(null)
+    void api.sessionCwd({ sessionId, cwd: scopeCwd }, controller.signal).then((result) => {
+      if (controller.signal.aborted || result.sessionId !== sessionId || result.cwd === '') return
+      setSessionWorkspace({ sessionId, scopeCwd, cwd: result.cwd, signal: controller.signal })
+    }, (_reason) => {
+      // Unavailable metadata leaves fenced editor navigation disabled.
+    })
+    return () => { controller.abort() }
+  }, [scope.sessionId, scope.cwd])
+
+  const canOpenFile = (path: string): boolean => store.getPrefs().workspaceFence === false
+    || (sessionWorkspace !== null && !sessionWorkspace.signal.aborted && sessionWorkspace.sessionId === scope.sessionId
+      && sessionWorkspace.scopeCwd === scope.cwd && isWithinWorkspace(sessionWorkspace.cwd, path))
 
   /** The open file-row context menu (cursor position for the portaled Menu). */
   const [fileMenu, setFileMenu] = useState<{ entry: GitStatusEntry; staged: boolean; x: number; y: number } | null>(null)
@@ -623,7 +644,7 @@ export function GitLens(props: GitLensProps) {
               // action for that checkout so the menu does not offer a no-op
               // that confuses the user; with the fence disarmed (the
               // `workspaceFence` pref) the open is allowed through.
-              ...(fileMenu !== null && (store.getPrefs().workspaceFence === false || isWithinWorkspace(scope.cwd ?? '', resolveSidebarPath(repoRoot ?? selectedWorktree ?? scope.cwd, fileMenu.entry.path)))
+              ...(fileMenu !== null && canOpenFile(resolveSidebarPath(repoRoot ?? selectedWorktree ?? scope.cwd, fileMenu.entry.path))
                 ? [{ id: 'open', label: t('openEditor'), icon: <IconCodeOutlineRegular size={14} /> }]
                 : []),
               fileMenu?.staged === true
@@ -647,7 +668,7 @@ export function GitLens(props: GitLensProps) {
                 // racing repo switch could still reach here with a path
                 // the host would reject. No-op in that case — unless the
                 // workspace fence is disarmed by pref.
-                if (store.getPrefs().workspaceFence !== false && !isWithinWorkspace(scope.cwd ?? '', resolved)) return
+                if (!canOpenFile(resolved)) return
                 onOpenFile(resolved)
                 return
               }

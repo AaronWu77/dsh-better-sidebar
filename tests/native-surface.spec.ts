@@ -141,7 +141,7 @@ describe('service routing into the native surface', () => {
   it('opens a file path as a resource address', () => {
     const { service, calls } = mount()
     service.openTab({ type: 'editor', path: '/work/a.ts', title: 'a.ts' }, scope)
-    expect(calls).toEqual([{ op: 'openResource', sessionId: 's1', address: 'addr://s1/work/work/a.ts', revealIfOpened: true }])
+    expect(calls).toEqual([{ op: 'openResource', sessionId: 's1', address: 'addr://s1/work/work/a.ts', params: { title: 'a.ts' }, revealIfOpened: true }])
   })
   it('carries "open to the side" to the surface as preferNewPane', () => {
     const { service, calls } = mount()
@@ -156,6 +156,7 @@ describe('service routing into the native surface', () => {
       op: 'openResource',
       sessionId: 's1',
       address: 'addr://s1/work/work/a.ts',
+      params: { title: 'a.ts' },
       revealIfOpened: false,
       preferNewPane: true,
     }])

@@ -59,7 +59,13 @@
 
 > 🔌 **核心理念**：服务优先——内置的 8 tab + 6 viewer 与第三方插件通过同一套 `ctx.betterSidebar` API 注册，能力完全对等；官方不再内置、可由生态提供的功能，交由生态插件实现（已有 **28+ 生态插件**，见下方「🌐 插件生态」）。接入文档见「🔌 服务化扩展」与 [外部插件接入指南](./docs/external-plugin-guide.md)。
 
+## Windows / WSL 文件路径
+
+Windows 文件打开保留 WSL 的 UNC 命名空间：单前导分隔符的 `/wsl.localhost/<发行版>/…` 或 `/wsl$/<发行版>/…` 会在盘符解析前还原为 UNC，而不是落到 `D:/wsl.localhost/…`。规范 UNC、普通盘符路径及非 Windows 主机不改变；WSL 会话里的 `/home/…` 仍投影到该会话的发行版。路径仍经过 realpath、symlink 和 `workspaceFence` 检查，不自动关闭围栏，也不把本地 WSL 文件发送到 SSH 主机。
+
 ## 🚀 安装
+
+当前隔离候选为 `0.19.3-remote.6`，须与 Remote SSH `0.2.4-aaron.12-sidebar.6` 配套。启用原生编辑器时，对话文件链接保留远端会话地址，不替换成本地下载缓存；产物文件、目录及 Git 编辑器打开保留来源会话和意图。正式服务停止后再一起安装两个包；准备安装包不会更新正在运行的 GUI。详见[文件导航升级指南](docs/upgrade-guide/v0.19.3-remote.5/remote-file-navigation/guide.zh.md)。远端搜索的协议与上限保持不变，本版不优化大型工作区搜索延迟。
 
 **前置**：已装好 DSH（`dsh web` 能正常运行），Node.js ≥ 20、pnpm ≥ 10。
 
@@ -615,7 +621,7 @@ GitHub topic [`dsh-better-sidebar`](https://github.com/topics/dsh-better-sidebar
 pnpm install      # @deepseek-ai/* devDependencies 已发布（基线 0.1.2-rc.1，next dist-tag），直接解析、无需令牌
 pnpm typecheck    # tsc --noEmit
 pnpm lint         # eslint .（flat config：js + typescript-eslint + react-hooks recommended）
-pnpm build        # → lib/index.js + lib/invariant.js + lib/client.js + lib/client-registry.js + lib/types
+pnpm build        # → lib/index.js + lib/client.js + lib/client-registry.js + lib/types （DSH alpha.2 不提供 dsh-invariants 伴随插件）
 pnpm test         # vitest（含 manifest 一致性守卫，需先 build）
 pnpm watch        # tsdown --watch
 ```
@@ -634,7 +640,10 @@ make clean          # 清理 lib/、*.tgz、playwright-report/、test-results/
 
 ## 🔐 安全
 
-- 路由受 Host 头信任围栏保护（与 `/api` 一致）；`fs.write` 原子写入；媒体/预览路由仅限会话 cwd 内文件；git 只调 CLI、绝不设置身份
+- 所有侧栏 HTTP 路由和 WebSocket 握手均使用宿主 `connection.requestRejection` 校验登录 Cookie 与 Host/Origin；未登录返回 401，不受信任请求返回 403，校验发生在读取请求体或分配终端之前。候选版需要提供该 API 的宿主；迁移见 [认证升级指南](docs/upgrade-guide/v0.19.2/sidebar-authentication/guide.zh.md)。`fs.write` 原子写入；媒体/预览路由按工作区围栏设置约束路径；Git 只调 CLI、不设置身份。
+- 工作区请求只使用活动或只读持久化会话头的 `cwd`，忽略浏览器目录提示；未知会话或无效会话目录会被拒绝，不会兜底到宿主进程目录。迁移见[会话工作区升级指南](docs/upgrade-guide/v0.19.2/sidebar-session-workspace/guide.zh.md)。
+- 配置了 `remoteSshManager` 的宿主还必须注册侧栏工作区路由器；缺少注册时返回 503，而不是选择本地文件系统。提供方通过只供类型导入的 `dsh-better-sidebar/workspace-provider` 出口获取类型，并以受生命周期管理的 effect 向 `ctx.sidebarWorkspaceProviders` 注册。`0.19.3-auth.2` tarball 仅含认证修复，不包含此联调改动。
+- 远端界面/模型终端在 park 与裸断线期间保持后端存活，回放有界的原始 VT，并通过所属 Session key 显式关闭。缺少 node-pty 仅阻止本地分配。代理 UUID 附加和关闭/跳过请求必须携带 `sessionId`；迁移见[远端终端升级指南](docs/upgrade-guide/v0.19.2/sidebar-remote-terminals/guide.zh.md)。安装配套 `0.19.3-remote.3` 与 `0.2.4-aaron.12-sidebar.3` 归档前先停止服务。
 - HTML 预览与浏览器 tab 的内容在**不透明源沙箱 iframe** 中渲染（无 `allow-same-origin`/`allow-top-navigation`、`no-referrer`、权限策略全禁）；`/sidebar/html` 路由带 CSP `sandbox` + 大小/路径边界；地址栏拒绝 `javascript:`/`data:`/`file:` 与 localhost 等本机地址
 - 界面实时显示沙箱状态（关闭时红色警示），可临时解锁当前页面；设置页可按功能关闭沙箱（默认关闭该设置，带警告文案）——关闭后内容与界面同源，仅建议对完全可信内容使用
 

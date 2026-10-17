@@ -362,6 +362,7 @@ export function SideChatView(props: {
         // with the existing localized failure pill (avoids a new key across
         // every shipped dictionary).
         noExitCode: t('sideChatBlockFailed'),
+        commandLine: (line: number) => t('sideChatBlockCommandLine', { line }),
         running: t('sideChatBlockRunning'),
         failed: t('sideChatBlockFailed'),
         done: t('sideChatBlockDone'),

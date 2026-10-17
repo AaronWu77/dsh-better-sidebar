@@ -345,12 +345,12 @@ export const api = {
   ptyClose: (scope: SessionScope, tab: string) =>
     call<{ ok: true }>('pty.close', scopePayload(scope, { tab })),
   /** Release an agent terminal by uuid (tab closed while WS was down). */
-  agentPtyClose: (uuid: string) =>
-    call<{ ok: true }>('agent-pty.close', { uuid }),
+  agentPtyClose: (scope: SessionScope, uuid: string) =>
+    call<{ ok: true }>('agent-pty.close', scopePayload(scope, { uuid })),
   /** Skip every active terminal_wait_for on one agent terminal (the wait
    *  banner's skip button). Idempotent: {skipped:0} when none is active. */
-  agentSkipWait: (uuid: string) =>
-    call<{ ok: true; skipped: number }>('agent-pty.skip-wait', { uuid }),
+  agentSkipWait: (scope: SessionScope, uuid: string) =>
+    call<{ ok: true; skipped: number }>('agent-pty.skip-wait', scopePayload(scope, { uuid })),
   /** Terminal dependency status (issue #140): after a WS close 1011 with
    *  reason `pty-deps-missing` the view fetches the full repair details here
    *  (the close reason itself is capped at 123 bytes). */
@@ -404,9 +404,9 @@ export const api = {
       childId,
       ...(afterSeq !== undefined ? { afterSeq } : {}),
     }, signal),
-  /** The effective terminal shell and its display name (plugin-global). */
-  shellGet: () =>
-    call<{ shell: string; name: string }>('shell.get', {}),
+  /** Session-selected terminal shell; omitted sessionId retains legacy local metadata only. */
+  shellGet: (sessionId?: string) =>
+    call<{ shell: string; name: string }>('shell.get', { sessionId }),
   /** Read the side card preferences (plugin-global, no session scope). */
   settingsGet: () =>
     call<{ value?: unknown; revision?: number; externalDisable?: boolean }>('settings.get', {}),
