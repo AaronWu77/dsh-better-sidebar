@@ -3,12 +3,13 @@ import { apply, inject } from '../src/index.ts'
 import { browserAdmission } from '../src/authentication.ts'
 import type { SidebarHttpRequest, SidebarWebRoute, SidebarWebUpgradeRoute } from '../src/context-types.ts'
 
-function mount() {
+function mount(principal?: string) {
   const routes: SidebarWebRoute[] = []
   const upgrades: SidebarWebUpgradeRoute[] = []
   const effects: (() => void)[] = []
   const sessionRead = vi.fn(() => undefined)
   const connection = {
+    ...(principal === undefined ? {} : { admit: () => ({ peer: { principal: { kind: principal } } }) }),
     requestRejection: vi.fn((request: SidebarHttpRequest): 401 | 403 | undefined => {
       if (request.headers['sec-fetch-site'] === 'cross-site') return 403
       return request.headers.cookie === 'session=valid' ? undefined : 401
@@ -110,6 +111,30 @@ describe('sidebar browser authentication', () => {
       expect(JSON.parse(reply.result.body).ok).toBe(true)
       expect(f.connection.requestRejection).toHaveBeenCalledWith(r.req)
     } finally { f.dispose() }
+  })
+
+  it('rejects a future non-owner Peer on every raw HTTP and WS entry before effects', async () => {
+    const f = mount('future-non-owner')
+    try {
+      for (const route of f.routes) {
+        const r = request(route.path, 'session=valid')
+        const reply = response()
+        await route.handler(r.req, reply.res)
+        expect(reply.result.status, route.path).toBe(403)
+        expect(r.consume).not.toHaveBeenCalled()
+      }
+      for (const route of f.upgrades) {
+        const socket = { end: vi.fn(), destroy: vi.fn() }
+        route.handler(request(route.path, 'session=valid').req, socket, new Uint8Array())
+        expect(socket.end).toHaveBeenCalledWith(expect.stringContaining('HTTP/1.1 403 Forbidden'))
+      }
+      expect(f.sessionRead).not.toHaveBeenCalled()
+    } finally { f.dispose() }
+  })
+
+  it('admits an owner Peer without weakening the existing trust fence', () => {
+    const connection = { requestRejection: () => undefined, admit: () => ({ peer: { principal: { kind: 'owner' } } }) }
+    expect(browserAdmission({ get: () => connection } as never)(request('/sidebar/api').req)).toBeUndefined()
   })
 
   it('requires host authentication rather than falling back to a trust-only fence', () => {

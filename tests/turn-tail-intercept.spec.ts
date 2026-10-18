@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Turn-tail interception registration spec (issue #15): `registerTurnTailInterception`
  * must go through `ctx.slots.inject` — the slot is a CHILD slot the host's
@@ -16,6 +17,8 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { createSidebarStore } from '../src/client/state.ts'
+import { createBetterSidebarService, type SidebarSurface } from '../src/client/service.ts'
+import { fileAddressFor, parseFileAddress } from '../src/client/resource-address.ts'
 import { registerTurnTailInterception } from '../src/client/intercept.tsx'
 import type { Context } from '../src/context-types.ts'
 
@@ -89,6 +92,24 @@ const clientCtx = (slots: unknown): Context => {
     betterSidebar,
     get: (name: string) => name === 'betterSidebar' ? betterSidebar : undefined,
   } as unknown as Context
+}
+
+/** Use the real remote.6 openFile -> native resource path, not a legacy openTab spy. */
+function nativeClientCtx(slots: unknown, store: ReturnType<typeof createSidebarStore>) {
+  const service = createBetterSidebarService(store)
+  service.registerTab({ id: 'editor', title: 'Files', component: () => null })
+  const surface: SidebarSurface = {
+    openResource: vi.fn(), openTab: vi.fn(), fileAddress: fileAddressFor,
+    openTabs: () => [], close: () => undefined, update: () => false,
+    activate: () => false, has: () => false,
+  }
+  service.setSurface(surface)
+  const sessions = { list: { getSnapshot: () => ({ current: 's1', byId: {
+    s1: { id: 's1', cwd: '/w' }, remote: { id: 'remote', cwd: '/srv/project' },
+  } }) } }
+  const ctx = { ...clientCtx(slots), sessions, betterSidebar: service,
+    get: (name: string) => name === 'betterSidebar' ? service : undefined } as unknown as Context
+  return { ctx, surface }
 }
 
 /** The registered component, typed for a direct call. */
@@ -183,10 +204,28 @@ describe('turn-tail interception registration (issue #15)', () => {
     restore()
   })
 
+  it('retains remote source-session identity and rejects wrong-scope/local-copy equivalence', () => {
+    const fake = fakeSlots(true)
+    const store = createSidebarStore()
+    const { ctx, surface } = nativeClientCtx(fake.slots, store)
+    const restore = registerTurnTailInterception(ctx, store)
+    try {
+      const inject = fake.registered[0]!.options.inject as (sessionId: string) => { openInSidebar(path: string): void }
+      inject('remote').openInSidebar('src/说明 #1.ts')
+      const [opened] = vi.mocked(surface.openResource).mock.calls[0]!
+      expect(opened.sessionId).toBe('remote')
+      expect(parseFileAddress(opened.address)).toEqual({ scope: 'session', sessionId: 'remote', path: 'src/说明 #1.ts' })
+      expect(opened.address).not.toBe(fileAddressFor('s1', '/w', 'src/说明 #1.ts'))
+      expect(opened.address).not.toBe(fileAddressFor('remote', '/srv/project', 'other.ts'))
+      expect(opened.address).not.toContain('Temp')
+      expect(surface.openTab).not.toHaveBeenCalled()
+    } finally { restore() }
+  })
+
   it('wires the store, openInSidebar, and onShowInFolder seats', () => {
     const fake = fakeSlots(true)
-    const ctx = clientCtx(fake.slots)
     const store = createSidebarStore()
+    const { ctx, surface } = nativeClientCtx(fake.slots, store)
     const restore = registerTurnTailInterception(ctx, store)
     const inject = fake.registered[0]!.options.inject as (sessionId: string) => {
       store: unknown
@@ -199,20 +238,19 @@ describe('turn-tail interception registration (issue #15)', () => {
     expect(seat.store).toBe(store)
     expect(seat.openInSidebar).toBeTypeOf('function')
     seat.openInSidebar('/w/src/a.ts')
-    expect(ctx.betterSidebar.openTab).toHaveBeenCalledWith({
-      type: 'editor',
-      title: 'a.ts',
-      path: '/w/src/a.ts',
-      id: 'editor:/w/src/a.ts',
+    expect(surface.openResource).toHaveBeenCalledWith({
+      sessionId: 's1', address: 'dsh-resource://file/session/s1/src/a.ts',
+      params: { title: 'a.ts' }, revealIfOpened: true,
     })
+    expect(surface.openTab).not.toHaveBeenCalled()
 
     // The show-in-folder seat reveals the produced files in the files window
     // (the editor home tab) — the panel expands and the rows highlight.
     expect(seat.onShowInFolder).toBeTypeOf('function')
     seat.onShowInFolder(['/w/src/a.ts'])
-    expect(ctx.betterSidebar.openTab).toHaveBeenLastCalledWith(expect.objectContaining({
-      type: 'editor',
-    }))
+    expect(surface.openTab).toHaveBeenLastCalledWith({
+      sessionId: 's1', kind: 'files', params: {}, revealIfOpened: true,
+    })
 
     restore()
   })

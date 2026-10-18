@@ -7,6 +7,8 @@ export type SidebarRequestRejection = (request: SidebarHttpRequest) => 401 | 403
 
 interface BrowserAuthentication {
   requestRejection: SidebarRequestRejection
+  /** rc.2 raw admission includes live API Peers, not just the browser owner. */
+  admit?(request: SidebarHttpRequest): { rejection: 401 | 403 } | { peer: { principal: { kind: string } } }
 }
 
 /** Require the host's authenticated browser admission service before registering routes.
@@ -18,7 +20,16 @@ export function browserAdmission(ctx: Context): SidebarRequestRejection {
   if (connection === undefined || typeof connection.requestRejection !== 'function') {
     throw new Error('dsh-better-sidebar requires connection.requestRejection for authenticated browser access')
   }
-  return request => connection.requestRejection(request)
+  return request => {
+    const rejection = connection.requestRejection(request)
+    if (rejection !== undefined) return rejection
+    // Unlike Connection exact-fetch, raw HTTP/WS has no automatic owner fence.
+    // Older hosts expose only requestRejection; keep their existing admission.
+    if (typeof connection.admit !== 'function') return undefined
+    const admission = connection.admit(request)
+    if ('rejection' in admission) return admission.rejection
+    return admission.peer.principal.kind === 'owner' ? undefined : 403
+  }
 }
 
 /** Refuse an HTTP request before reading its body or resolving any session or file.

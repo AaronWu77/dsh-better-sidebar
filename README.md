@@ -1,5 +1,15 @@
 # dsh-better-sidebar
 
+## 0.2.1-rc.2 隔离候选资格（2026-10-17）
+
+此处只描述当前 fork 候选，不继承下文历史发行版的真机验证结论。配对仍为 Sidebar `0.19.3-remote.6` + Remote SSH `0.2.4-aaron.12-sidebar.6`；Host 固定 `0.2.1-rc.2 / 687f282`。实际 workspace 链接解析到 Cordis `4.0.5`、Schemastery `3.18.5`；开发 DSH 依赖精确钉 rc.2，peer/engines 保留 alpha.2 并加入 rc.2。保留的旧版本声明**不表示本轮重新验证旧版**。依赖由候选 workspace 根统一冻结；本包适配没有另行 install。
+
+- 源码 focused（`--maxWorkers=1`）：26 文件 **323 通过、1 平台跳过**；另有远端终端 registry/model-tools **12 通过、7 浏览器 socket 用例未选**。共 27 文件 **335 通过、8 未验证**，跳过不计通过。涵盖认证、Sidechat seed/inheritedEventCount 与真实 Session 验证器、父 model/cwd、首边界、冷 resume/preset/转录、assistant-stream 帧、原生/跨会话文件身份与相对链接/围栏、服务 API 与 shell presets。真实内存 Connection 的 4 个用例包含在上述统计内。
+- rc.2 `requestRejection` 接受浏览器 owner 与有效 live API Peer；当前 Host 的 token exchange 只生成 owner，并未复现默认非 owner credential。raw HTTP/WS 不自动继承 Connection exact-fetch 的 owner 栅栏，因此在新 Host 提供 `admit` 时额外要求 `peer.principal.kind === 'owner'`；旧 Host 无此 API 时保留原准入策略。匿名/坏 Origin/坏 authority、API Peer 释放后仍签名的 cookie、卸载后的凭据均有拒绝回归；未来非 owner 的结构化负例不会被默认放行。
+- 旧 turn-tail 测试仅伪造 legacy `openTab`，既缺 `openFile` 又缺 DOM；已迁移到真实 service → native `openResource`，继续断言来源 Session、路径、远端资源身份及错误 scope/路径不得等价，不回退产品行为、不修改录制 snapshot。
+- 本包 typecheck、先 Sidebar build 再 Remote build（含 typecheck）、随后 Remote 独立 typecheck 均通过。**未启动 DSH 服务、未挂真实 profile、未用真实浏览器/provider/SSH/原生 PTY**；真实 Loader/浏览器与远端 canary 仍是部署资格缺口，不能用上述源/帧测试代替。未改变外观、未部署、未 commit/push；不能单独替换配对包。
+
+
 > [!IMPORTANT]
 > **已适配 DSH 原生侧边栏 API**（v0.19.0 起，DSH `0.1.5-rc.1+`）：右列就是 DSH 自己的右侧栏——插件的每个 tab 类型与 tab 体通过 `ctx.sidebarRightTabs` / `ctx.sidebarRight` 注册与打开，聊天里的文件打开统一走 `ctx.sidebarRight.openResource('dsh-resource://file/…')`，插件**不再自绘右侧面板**（旧的浮窗能力同步移除）。自绘的底部工作台与开放给其他插件的 `ctx.betterSidebar` 服务保持不变，接入方式见[插件接入指南](docs/external-plugin-guide.md)。
 
@@ -640,7 +650,7 @@ make clean          # 清理 lib/、*.tgz、playwright-report/、test-results/
 
 ## 🔐 安全
 
-- 所有侧栏 HTTP 路由和 WebSocket 握手均使用宿主 `connection.requestRejection` 校验登录 Cookie 与 Host/Origin；未登录返回 401，不受信任请求返回 403，校验发生在读取请求体或分配终端之前。候选版需要提供该 API 的宿主；迁移见 [认证升级指南](docs/upgrade-guide/v0.19.2/sidebar-authentication/guide.zh.md)。`fs.write` 原子写入；媒体/预览路由按工作区围栏设置约束路径；Git 只调 CLI、不设置身份。
+- 所有侧栏 HTTP 路由和 WebSocket 握手均先使用宿主 `connection.requestRejection` 校验 Cookie 与 Host/Origin；rc.2 同时接受 live API owner，另通过 `admit` 拒绝非 owner（旧 Host 无该 API 时保持原栅栏）；未登录返回 401，不受信任请求返回 403，校验发生在读取请求体或分配终端之前。候选版需要提供该 API 的宿主；迁移见 [认证升级指南](docs/upgrade-guide/v0.19.2/sidebar-authentication/guide.zh.md)。`fs.write` 原子写入；媒体/预览路由按工作区围栏设置约束路径；Git 只调 CLI、不设置身份。
 - 工作区请求只使用活动或只读持久化会话头的 `cwd`，忽略浏览器目录提示；未知会话或无效会话目录会被拒绝，不会兜底到宿主进程目录。迁移见[会话工作区升级指南](docs/upgrade-guide/v0.19.2/sidebar-session-workspace/guide.zh.md)。
 - 配置了 `remoteSshManager` 的宿主还必须注册侧栏工作区路由器；缺少注册时返回 503，而不是选择本地文件系统。提供方通过只供类型导入的 `dsh-better-sidebar/workspace-provider` 出口获取类型，并以受生命周期管理的 effect 向 `ctx.sidebarWorkspaceProviders` 注册。`0.19.3-auth.2` tarball 仅含认证修复，不包含此联调改动。
 - 远端界面/模型终端在 park 与裸断线期间保持后端存活，回放有界的原始 VT，并通过所属 Session key 显式关闭。缺少 node-pty 仅阻止本地分配。代理 UUID 附加和关闭/跳过请求必须携带 `sessionId`；迁移见[远端终端升级指南](docs/upgrade-guide/v0.19.2/sidebar-remote-terminals/guide.zh.md)。安装配套 `0.19.3-remote.3` 与 `0.2.4-aaron.12-sidebar.3` 归档前先停止服务。
